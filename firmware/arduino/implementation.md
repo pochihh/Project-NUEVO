@@ -10,6 +10,23 @@ The firmware provides real-time motor control, sensor integration, and communica
 Refer to [pin_table.md](pin_table.md) for the complete GPIO mapping.
 Refer to [technical_notes.md](technical_notes.md) for low-level technical details on timers, interrupts, and design rationale.
 
+## Compile the Code
+
+The main sketch is in `firmware/arduino/`. Run the following commands from the `firmware/` directory:
+
+```bash
+# Compile main firmware
+arduino-cli compile --fqbn arduino:avr:mega arduino
+
+# Compile specific test
+arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_scheduler
+
+# Upload to Arduino Mega (find your port with: arduino-cli board list)
+arduino-cli upload -p /dev/cu.usbserial* --fqbn arduino:avr:mega arduino
+```
+
+The test sketches are in `firmware/arduino/tests/`. Each test must be in its own folder (Arduino IDE requirement).
+
 ### Key Design Decisions
 
 | Decision | Choice | Rationale |
@@ -740,23 +757,43 @@ firmware/arduino/
 
 ## Test Sketches
 
-All test sketches are in `firmware/arduino/tests/`. Each is standalone and can be uploaded independently.
+All test sketches are in `firmware/arduino/tests/`. Each test is in its own folder (Arduino IDE requirement).
 
-| Sketch | Phase | Purpose |
-|--------|-------|---------|
-| `test_scheduler.ino` | 1 | Timer interrupt timing accuracy |
-| `test_uart_tlv.ino` | 2 | TLV encode/decode at 921600 baud |
-| `test_encoder.ino` | 3 | Quadrature encoder counting |
-| `test_dc_motor_pwm.ino` | 3 | Direct PWM motor control |
-| `test_dc_motor_pid.ino` | 3 | PID position/velocity control |
-| `test_stepper.ino` | 4 | Stepper step/dir/enable |
-| `test_servo.ino` | 4 | PCA9685 servo sweep |
-| `test_imu.ino` | 5 | ICM-20948 accel/gyro reading |
-| `test_ultrasonic.ino` | 5 | I2C ultrasonic distance |
-| `test_voltage.ino` | 5 | Battery/rail voltage ADC |
-| `test_buttons.ino` | 5 | Button/limit switch states |
-| `test_leds.ino` | 5 | User LEDs and NeoPixels |
-| `test_full_system.ino` | 6 | Complete integration test |
+**Folder Structure:**
+```
+tests/
+├── test_scheduler/
+│   └── test_scheduler.ino
+├── test_uart_tlv/
+│   └── test_uart_tlv.ino
+├── test_encoder/
+│   └── test_encoder.ino
+...
+```
+
+**Compile Tests:**
+```bash
+# From firmware/ directory:
+arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_scheduler
+arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_uart_tlv
+# etc.
+```
+
+| Test Folder | Phase | Purpose |
+|-------------|-------|---------|
+| `test_scheduler/` | 1 | Timer interrupt timing accuracy |
+| `test_uart_tlv/` | 2 | TLV encode/decode at 921600 baud |
+| `test_encoder/` | 3 | Quadrature encoder counting |
+| `test_dc_motor_pwm/` | 3 | Direct PWM motor control |
+| `test_dc_motor_pid/` | 3 | PID position/velocity control |
+| `test_stepper/` | 4 | Stepper step/dir/enable |
+| `test_servo/` | 4 | PCA9685 servo sweep |
+| `test_imu/` | 5 | ICM-20948 accel/gyro reading |
+| `test_ultrasonic/` | 5 | I2C ultrasonic distance |
+| `test_voltage/` | 5 | Battery/rail voltage ADC |
+| `test_buttons/` | 5 | Button/limit switch states |
+| `test_leds/` | 5 | User LEDs and NeoPixels |
+| `test_full_system/` | 6 | Complete integration test |
 
 Each test sketch includes:
 - Clear header comment explaining what it tests
@@ -775,11 +812,12 @@ See individual test files for implementation details.
 
 | Phase | Component | Status | Date | Notes |
 |-------|-----------|--------|------|-------|
-| **1** | `config.h` | ⬜ | | Timing, enables, defaults |
-| **1** | `pins.h` | ⬜ | | Pin definitions from README |
-| **1** | `Scheduler.h/cpp` | ⬜ | | Timer1 + task management |
-| **1** | `test_scheduler.ino` | ⬜ | | |
-| **2** | `TLV_Payloads.h` | ⬜ | | Packed structs |
+| **1** | `config.h` | ✅ | 2026-01-27 | Timing, enables, defaults |
+| **1** | `pins.h` | ✅ | 2026-01-27 | Pin definitions from README |
+| **1** | `Scheduler.h/cpp` | ✅ | 2026-01-27 | Timer1 @ 1kHz + task management |
+| **1** | `arduino.ino` | ✅ | 2026-01-27 | Main structure with placeholders |
+| **1** | `test_scheduler/` | ✅ | 2026-01-27 | Multi-LED blink test verified |
+| **2** | `TLV_Payloads.h` | ✅ | 2026-01-27 | Packed structs for all message types |
 | **2** | `MessageCenter.h/cpp` | ⬜ | | Refactor from existing |
 | **2** | `test_uart_tlv.ino` | ⬜ | | |
 | **3** | `EncoderCounter.h/cpp` | ⬜ | | 2x/4x modes |

@@ -1,9 +1,10 @@
 # MAE 162 Robotics Platform - Git Ignore
 
 # ============================================
-# Claude Code
+# Local development environment
 # ============================================
 .claude/
+.vscode/
 
 # ============================================
 # ROS2 Workspace
@@ -195,6 +196,12 @@ test_data/
 logs/
 *.log
 
+
+# TLV Type Generated Definitions
+TLV_TypeDefs.h
+TLV_TypeDefs.py
+
 # Large binary assets (document separately)
 # *.stl  # Uncomment if STL files are too large
 # *.step # Uncomment if STEP files are too large
+

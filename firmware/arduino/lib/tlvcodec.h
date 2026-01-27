@@ -7,6 +7,8 @@
 
 #ifndef TLV_CODEC_H
 #define TLV_CODEC_H
+#include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 // define TLVCodec structs

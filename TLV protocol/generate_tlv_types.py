@@ -15,7 +15,7 @@ def generate_c_header(json_data, output_path):
     
     header_content = """#pragma once
 
-#include <cstdint>
+#include <stdint.h>
 
 // Define TLV type constants here so both server and client can use them:
 // A valid TLV type is a non-negative integer.
@@ -82,7 +82,7 @@ This file is auto-generated - DO NOT EDIT MANUALLY
 def main():
     script_dir = Path(__file__).parent
     json_file = script_dir / "TLV_TypeDefs.json"
-    header_file = script_dir / ".." / "firmware" / "arduino" /"src" / "TLV_TypeDefs.h"
+    header_file = script_dir / ".." / "firmware" / "arduino" / "src" / "messages" / "TLV_TypeDefs.h"
     python_file = script_dir / ".." / "ros2_ws" / "src" / "TLV_TypeDefs.py"
     
     # Read JSON file

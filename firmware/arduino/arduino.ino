@@ -37,9 +37,9 @@
 #include "src/pins.h"
 #include "src/Scheduler.h"
 
-// Phase 2+ includes (commented out until implemented)
-// #include "src/messages/MessageCenter.h"
-// #include "src/messages/TLV_Payloads.h"
+// Phase 2+ includes
+#include "src/messages/MessageCenter.h"
+#include "src/messages/TLV_Payloads.h"
 
 // Phase 3+ includes (commented out until implemented)
 // #include "src/modules/EncoderCounter.h"
@@ -102,19 +102,16 @@ void taskDCMotorPID() {
  * Runs every 10ms (100Hz).
  */
 void taskUARTComms() {
-  // Phase 2: MessageCenter processing will be implemented here
-  // For now, this is a placeholder
+  // Process incoming/outgoing TLV messages
+  MessageCenter::processingTick();
 
-  // Future implementation:
-  // MessageCenter::processingTick();
-  //
-  // // Safety timeout check
-  // if (!MessageCenter::isHeartbeatValid()) {
-  //   // Disable all motors
-  //   for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-  //     dcMotors[i].disable();
-  //   }
-  // }
+  // Safety timeout check
+  if (!MessageCenter::isHeartbeatValid()) {
+    // TODO Phase 3: Disable all motors when heartbeat timeout occurs
+    // for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
+    //   dcMotors[i].disable();
+    // }
+  }
 }
 
 /**
@@ -193,10 +190,10 @@ void setup() {
 #endif
 
   // ------------------------------------------------------------------------
-  // Phase 2: Initialize MessageCenter (UART + TLV)
+  // 3. Initialize MessageCenter (UART + TLV)
   // ------------------------------------------------------------------------
-  // DEBUG_SERIAL.println(F("[Setup] Initializing UART communication..."));
-  // MessageCenter::init();
+  DEBUG_SERIAL.println(F("[Setup] Initializing UART communication..."));
+  MessageCenter::init();
 
   // ------------------------------------------------------------------------
   // Phase 5: Initialize SensorManager

@@ -12,20 +12,20 @@ Refer to [technical_notes.md](technical_notes.md) for low-level technical detail
 
 ## Compile the Code
 
-The main sketch is in `firmware/arduino/`. Run the following commands from the `firmware/` directory:
+The main sketch is in `firmware/arduino/`; tests are in `firmware/tests/`. Run the following commands from the `firmware/` directory:
 
 ```bash
 # Compile main firmware
 arduino-cli compile --fqbn arduino:avr:mega arduino
 
 # Compile specific test
-arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_scheduler
+arduino-cli compile --fqbn arduino:avr:mega tests/test_scheduler
 
 # Upload to Arduino Mega (find your port with: arduino-cli board list)
 arduino-cli upload -p /dev/cu.usbserial* --fqbn arduino:avr:mega arduino
 ```
 
-The test sketches are in `firmware/arduino/tests/`. Each test must be in its own folder (Arduino IDE requirement).
+The test sketches are in `firmware/tests/`. Each test must be in its own folder (Arduino IDE requirement).
 
 ### Key Design Decisions
 
@@ -605,21 +605,21 @@ attachInterrupt(digitalPinToInterrupt(PIN_M4_ENC_A), encoderISR_M4, CHANGE);
 ## File Structure
 
 ```
-firmware/arduino/
-├── arduino.ino                 # Main entry point
-├── implementation.md           # This document
-├── lib/
-│   ├── tlvcodec/              # TLV protocol codec (existing, C library)
-│   └── third_party/           # External libraries (ported/vendored)
-│       ├── ICM_20948/         # IMU driver (existing)
-│       ├── PCA9685/           # PWM driver (existing)
-│       └── NeoPixel/          # Addressable LED library (TBD)
-└── src/
-    ├── config.h               # Compile-time configuration parameters
-    ├── pins.h                 # Hardware pin definitions (mirrors README.md)
-    ├── Scheduler.h/cpp        # Timer1-based cooperative scheduler
-    │
-    ├── messages/              # Communication Layer
+firmware/
+├── arduino/                    # Main firmware sketch
+│   ├── arduino.ino                 # Main entry point
+│   ├── tlvcodec_compile.cpp        # Wrapper to compile tlvcodec.c
+│   ├── implementation.md           # This document
+│   ├── lib/
+│   │   ├── tlvcodec.c/h            # TLV protocol codec (C library)
+│   │   ├── ICM_20948.cpp/h         # IMU driver
+│   │   └── PCA9685.cpp/h           # PWM servo driver
+│   └── src/
+│       ├── config.h                # Compile-time configuration
+│       ├── pins.h                  # Hardware pin definitions
+│       ├── Scheduler.h/cpp         # Timer1-based cooperative scheduler
+│       │
+│       ├── messages/               # Communication Layer
     │   ├── MessageCenter.h/cpp    # TLV packet handling
     │   ├── TLV_TypeDefs.h         # TLV type constants
     │   └── TLV_Payloads.h         # Packed payload structs
@@ -632,12 +632,23 @@ firmware/arduino/
     │   ├── UltrasonicDriver.h/cpp # I2C ultrasonic wrapper
     │   └── NeoPixelDriver.h/cpp   # Addressable LED wrapper
     │
-    └── modules/               # High-level Logic
-        ├── EncoderCounter.h/cpp   # Encoder counting (2x/4x modes)
-        ├── VelocityEstimator.h/cpp # Velocity calculation algorithms
-        ├── StepperManager.h/cpp   # Timer3 + stepper coordination
-        ├── SensorManager.h/cpp    # Sensor data aggregation
-        └── UserIO.h/cpp           # Buttons, LEDs, NeoPixels
+│       └── modules/               # High-level Logic
+│           ├── EncoderCounter.h/cpp   # Encoder counting (2x/4x modes)
+│           ├── VelocityEstimator.h/cpp # Velocity calculation algorithms
+│           ├── StepperManager.h/cpp   # Timer3 + stepper coordination
+│           ├── SensorManager.h/cpp    # Sensor data aggregation
+│           └── UserIO.h/cpp           # Buttons, LEDs, NeoPixels
+│
+└── tests/                      # Test sketches (separate from main sketch)
+    ├── test_scheduler/
+    │   ├── test_scheduler.ino      # Phase 1 test
+    │   ├── src -> ../../arduino/src    # Symbolic link
+    │   └── lib -> ../../arduino/lib    # Symbolic link
+    ├── test_uart_tlv/
+    │   ├── test_uart_tlv.ino       # Phase 2 test
+    │   ├── src -> ../../arduino/src    # Symbolic link
+    │   └── lib -> ../../arduino/lib    # Symbolic link
+    └── (future test folders...)
 ```
 
 **Layer Separation:**
@@ -645,6 +656,7 @@ firmware/arduino/
 - `src/drivers/`: Direct hardware interaction, thin wrappers
 - `src/modules/`: Business logic, coordinates multiple drivers
 - `src/messages/`: Communication protocol handling
+- `tests/`: Each test in its own folder with symbolic links to share src/ and lib/
 
 ---
 
@@ -757,7 +769,7 @@ firmware/arduino/
 
 ## Test Sketches
 
-All test sketches are in `firmware/arduino/tests/`. Each test is in its own folder (Arduino IDE requirement).
+All test sketches are in `firmware/tests/`. Each test is in its own folder (Arduino IDE requirement).
 
 **Folder Structure:**
 ```
@@ -771,13 +783,37 @@ tests/
 ...
 ```
 
-**Compile Tests:**
+**Setup Test Environment (One-time):**
+
+Each test folder needs symbolic links to share the src/ and lib/ directories with the main sketch:
+
 ```bash
 # From firmware/ directory:
-arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_scheduler
-arduino-cli compile --fqbn arduino:avr:mega arduino/tests/test_uart_tlv
-# etc.
+cd tests/test_scheduler
+ln -s ../../arduino/src src
+ln -s ../../arduino/lib lib
+cd ../..
+
+cd tests/test_uart_tlv
+ln -s ../../arduino/src src
+ln -s ../../arduino/lib lib
+cd ../..
 ```
+
+**Compile Tests:**
+
+```bash
+# From firmware/ directory:
+arduino-cli compile --fqbn arduino:avr:mega tests/test_scheduler
+arduino-cli compile --fqbn arduino:avr:mega tests/test_uart_tlv
+
+# Upload test to Arduino Mega:
+arduino-cli upload -p /dev/cu.usbserial* --fqbn arduino:avr:mega tests/test_scheduler
+```
+
+**Verified Compilation Results:**
+- `test_scheduler`: 5590 bytes (2% flash), 445 bytes RAM (5%)
+- `test_uart_tlv`: 8222 bytes (3% flash), 2726 bytes RAM (33%)
 
 | Test Folder | Phase | Purpose |
 |-------------|-------|---------|
@@ -818,8 +854,10 @@ See individual test files for implementation details.
 | **1** | `arduino.ino` | ✅ | 2026-01-27 | Main structure with placeholders |
 | **1** | `test_scheduler/` | ✅ | 2026-01-27 | Multi-LED blink test verified |
 | **2** | `TLV_Payloads.h` | ✅ | 2026-01-27 | Packed structs for all message types |
-| **2** | `MessageCenter.h/cpp` | ⬜ | | Refactor from existing |
-| **2** | `test_uart_tlv.ino` | ⬜ | | |
+| **2** | `TLV_TypeDefs.h` | ✅ | 2026-01-27 | Moved to messages/, C-compatible |
+| **2** | `MessageCenter.h/cpp` | ✅ | 2026-01-27 | Complete refactor with TLV protocol |
+| **2** | `tlvcodec integration` | ✅ | 2026-01-27 | Wrapper for Arduino IDE compilation |
+| **2** | `test_uart_tlv/` | ⚠️ | 2026-01-27 | Needs testing with RPi (standalone test limited) |
 | **3** | `EncoderCounter.h/cpp` | ⬜ | | 2x/4x modes |
 | **3** | `VelocityEstimator.h/cpp` | ⬜ | | Edge-time method |
 | **3** | `DCMotor.h/cpp` | ⬜ | | Cascade PID |

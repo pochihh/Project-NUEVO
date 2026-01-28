@@ -36,9 +36,9 @@
 // ============================================================================
 
 // Include scheduler and configuration
-#include "config.h"
-#include "pins.h"
-#include "Scheduler.h"
+#include "src/config.h"
+#include "src/pins.h"
+#include "src/Scheduler.h"
 
 // ============================================================================
 // TEST CONFIGURATION

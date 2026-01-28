@@ -20,3 +20,14 @@ source install/setup.bash
 ```
 
 Target ROS2 distribution: Humble or Jazzy
+
+
+### Raspberry Pi 5 GPIO Allocation
+
+| GPIO | Function | Notes |
+|------|----------|-------|
+| GPIO2 (SDA1) | I2C Data | Qwiic connector |
+| GPIO3 (SCL1) | I2C Clock | Qwiic connector |
+| GPIO14 (TXD0) | UART TX to Arduino | Via level shifter |
+| GPIO15 (RXD0) | UART RX from Arduino | Via level shifter |
+| Other | GPIO Breakout | Unused pins to terminals |

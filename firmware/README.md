@@ -3,6 +3,10 @@
 This directory contains the Arduino firmware for low-level real-time control and sensor integration on a differential drive robot platform.
 Arduino Mega 2560 is used as the microcontroller, acting as a slave device to a Raspberry Pi master via UART using a custom TLV (Type-Length-Value) protocol.
 
+Refer to [implementation.md](implementation.md) for detailed module descriptions and architecture notes.
+Refer to [pin_table.md](pin_table.md) for the complete GPIO mapping.
+Refer to [technical_notes.md](technical_notes.md) for low-level technical details on timers, interrupts, and design rationale.
+
 ## Key features
 1. The firmware uses the tlvcodec protocol over UART to communicate with the Raspberry Pi
 2. Controls up to 4 DC motors with quadrature encoders (A/B phase) and current sensing (via ADC inputs)
@@ -120,28 +124,28 @@ Sensor data is sent as separate packets grouped by sensor type. If multiple sens
 ## GPIO Pin Assignment Table
 **Exposed pins are available on screw terminals/headers for reuse; core comms and default wheel drive pins remain internal.**
 
-| Pin(s) | Pin Name | Function | Exposed? | Notes |
-|--------|----------|----------|----------|-------|
+| Pin(s) | Pin Name | Function | Exposed? | Notes | *Pin Modification [REV. B] |
+|--------|----------|----------|----------|-------|-------------------|
 | 0 (RX0) | RX0 | USB Serial | No | Programming/debug only |
 | 1 (TX0) | TX0 | USB Serial | No | Programming/debug only |
 | 2 (INT0) | M1_ENC_A | Motor 1 Encoder A | No | Default left/right wheel encoder A |
-| 3 (INT1) | M2_ENC_A | Motor 2 Encoder A | No | Default left/right wheel encoder A |
-| 4 | M1_ENC_B | Motor 1 Encoder B | No | Default wheel encoder B |
-| 5 (PWM) | M1_EN | Motor 1 EN | No | Default wheel PWM |
-| 6 (PWM) | M2_EN | Motor 2 EN | No | Default wheel PWM |
-| 7 | M2_ENC_B | Motor 2 Encoder B | No | Default wheel encoder B |
-| 8 | M1_IN1 | Motor 1 IN1 | No | Default wheel direction |
-| 9 (PWM) | M3_EN | Motor 3 EN | Yes | PWM-capable |
-| 10 (PWM) | M4_EN | Motor 4 EN | Yes | PWM-capable |
-| 11 (PWM) | LED_RED | Status LED Red | No | Error/low battery indicator |
-| 12 | M2_IN1 | Motor 2 IN1 | No | Default wheel direction |
-| 13 | M2_IN2 | Motor 2 IN2 | No | Default wheel direction |
+| 3 (INT1) | ~~M2_ENC_A~~ | Motor 2 Encoder A | No | Default left/right wheel encoder A | M1_ENC_B |
+| 4 | ~~M1_ENC_B~~ | Motor 1 Encoder B | No | Default wheel encoder B | M2_IN1 |
+| 5 (PWM) | ~~M1_EN~~ | Motor 1 EN | No | Default wheel PWM | LED_RED |
+| 6 (PWM Timer 4) | ~~M2_EN~~ | Motor 2 EN | No | Default wheel PWM | M1_EN |
+| 7 (PWM Timer 4)| ~~M2_ENC_B~~ | Motor 2 Encoder B | No | Default wheel encoder B | M2_EN |
+| 8 (PWM) | M1_IN1 | Motor 1 IN1 | No | Default wheel direction |
+| 9 (PWM, timer 2) | M3_EN | Motor 3 EN | Yes | PWM-capable |
+| 10 (PWM, timer 2) | M4_EN | Motor 4 EN | Yes | PWM-capable |  |
+| 11 (PWM) | ~~LED_RED~~ | Status LED Red | No -> Yes | Error/low battery indicator | M4_ENC_A |
+| 12 | ~~M2_IN1~~ | Motor 2 IN1 | No -> Yes | Default wheel direction | M4_ENC_B |
+| 13 | ~~M2_IN2~~ | Motor 2 IN2 | No -> Yes | Default wheel direction | USER_P13 |
 | 14 | ST1_STEP | Stepper 1 STEP | Yes | Stepper control |
 | 15 | ST2_STEP | Stepper 2 STEP | Yes | Stepper control |
 | 16 (TX2) | TX_RPI | **UART to RPi5** | No | Via level shifter (5V → 3.3V) |
 | 17 (RX2) | RX_RPI | **UART from RPi5** | No | Via level shifter (3.3V → 5V) |
-| 18 (INT5) | M3_ENC_A | Motor 3 Encoder A | Yes | Interrupt-capable |
-| 19 (INT4) | M4_ENC_A | Motor 4 Encoder A | Yes | Interrupt-capable |
+| 18 (INT5) | ~~M3_ENC_A~~ | Motor 3 Encoder A | Yes _> No | Interrupt-capable | M2_ENC_A |
+| 19 (INT4) | ~~M4_ENC_A~~ | Motor 4 Encoder A | Yes -> No | Interrupt-capable | M2_ENC_B |
 | 20 (SDA) | SDA | I2C Data | Yes | Qwiic + PCA9685 module |
 | 21 (SCL) | SCL | I2C Clock | Yes | Qwiic + PCA9685 module |
 | 22 | ST1_DIR | Stepper 1 DIR | Yes | Stepper direction |
@@ -152,8 +156,8 @@ Sensor data is sent as separate packets grouped by sensor type. If multiple sens
 | 27 | ST2_EN | Stepper 2 ENABLE | Yes | Individual enable |
 | 28 | ST3_EN | Stepper 3 ENABLE | Yes | Individual enable |
 | 29 | ST4_EN | Stepper 4 ENABLE | Yes | Individual enable |
-| 30 | M3_ENC_B | Motor 3 Encoder B | Yes | Quadrature input |
-| 31 | M4_ENC_B | Motor 4 Encoder B | Yes | Quadrature input |
+| 30 | ~~M3_ENC_B~~ | Motor 3 Encoder B | Yes -> No | Quadrature input | M2_IN2 |
+| 31 | ~~M4_ENC_B~~ | Motor 4 Encoder B | Yes | Quadrature input | USER_P31 |
 | 32 | ST3_STEP | Stepper 3 STEP | Yes | Stepper control |
 | 33 | ST4_STEP | Stepper 4 STEP | Yes | Stepper control |
 | 34 | M3_IN1 | Motor 3 IN1 | Yes | Direction |
@@ -183,21 +187,38 @@ Sensor data is sent as separate packets grouped by sensor type. If multiple sens
 | A4 | M2_CT | Motor 2 Current Sense (CT) | No | H-bridge feedback |
 | A5 | M3_CT | Motor 3 Current Sense (CT) | Yes | H-bridge feedback |
 | A6 | M4_CT | Motor 4 Current Sense (CT) | Yes | H-bridge feedback |
-| A7-A15 | ANALOG_EXP | Analog Expansion | Yes | Available for sensors |
+| *A7-A13 | ANALOG_EXP | Analog Expansion | Yes | Available for sensors |
+| *A14 | ~~ANALOG_EXP~~ | Analog Expansion | Yes | | M3_ENC_A |
+| *A15 | ~~ANALOG_EXP~~ | Analog Expansion | Yes | | M3_ENC_B |
 
-**DC Motor Control Summary (per motor):**
+
+**DC Motor Control Summary (per motor) [REV. B]:**
 | Motor | EN (PWM) | IN1 | IN2 | Encoder A | Encoder B | Current (CT) |
 |-------|----------|-----|-----|-----------|-----------|--------------|
-| 1 | Pin 5 | Pin 8 | Pin 43 | Pin 2 (INT0) | Pin 4 | A3 |
-| 2 | Pin 6 | Pin 12 | Pin 13 | Pin 3 (INT1) | Pin 7 | A4 |
-| 3 | Pin 9 | Pin 34 | Pin 35 | Pin 18 (INT5) | Pin 30 | A5 |
-| 4 | Pin 10 | Pin 36 | Pin 37 | Pin 19 (INT4) | Pin 31 | A6 |
+| 1 | Pin 6 | Pin 8 | Pin 43 | Pin 2 (INT0) | Pin 3 (INT1) | A3 |
+| 2 | Pin 7 | Pin 4 | Pin 30 | Pin 18 (INT5) | Pin 19 (INT4) | A4 |
+| 3 | Pin 9 | Pin 34 | Pin 35 | A14 (PCINT) | A15 (PCINT) | A5 |
+| 4 | Pin 10 | Pin 36 | Pin 37 | Pin 11 (PCINT) | Pin 12 (PCINT) | A6 |
 
-**Hardware Interrupts Used:**
-- INT0 (pin 2): Motor 1 Encoder A
-- INT1 (pin 3): Motor 2 Encoder A
-- INT4 (pin 19): Motor 4 Encoder A
-- INT5 (pin 18): Motor 3 Encoder A
+**Hardware Interrupts Used [REV. B]:**
+
+*External Interrupts (INT) - Highest Priority:*
+- INT0 (Pin 2): Motor 1 Encoder A
+- INT1 (Pin 3): Motor 1 Encoder B
+- INT5 (Pin 18): Motor 2 Encoder A
+- INT4 (Pin 19): Motor 2 Encoder B
+
+*Pin Change Interrupts (PCINT) - Lower Priority (optional 4x mode):*
+- PCINT0 (Pins 11, 12): Motor 4 Encoder A/B
+- PCINT1 (A14, A15): Motor 3 Encoder A/B
+
+**4x Encoder Resolution Support:**
+| Motor | 4x Mode | Interrupt Type | Notes |
+|-------|---------|----------------|-------|
+| M1 (Wheel) | ✅ Full | External INT | Both channels on INT0/INT1 |
+| M2 (Wheel) | ✅ Full | External INT | Both channels on INT4/INT5 |
+| M3 (Manip) | ⚠️ Optional | PCINT | Lower priority, 2x default |
+| M4 (Manip) | ⚠️ Optional | PCINT | Lower priority, 2x default |
 
 **Serial Ports:**
 - Serial0 (pins 0/1): USB programming/debug

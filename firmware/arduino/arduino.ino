@@ -1,6 +1,7 @@
 /**
  * @file arduino.ino
- * @brief Main entry point for Arduino Mega 2560 firmware
+ * @brief Main firmware for Arduino Mega 2560 educational robotics platform
+ * @version 0.6.0
  *
  * Educational robotics platform firmware for MAE 162 course.
  * Provides real-time motor control, sensor integration, and
@@ -33,25 +34,26 @@
 // INCLUDES
 // ============================================================================
 
+// Core configuration
 #include "src/config.h"
 #include "src/pins.h"
 #include "src/Scheduler.h"
 
-// Phase 2+ includes
-#include "src/messages/MessageCenter.h"
+// Communication
+#include "src/modules/MessageCenter.h"
 #include "src/messages/TLV_Payloads.h"
 
-// Phase 3+ includes
+// DC motor control
 #include "src/modules/EncoderCounter.h"
 #include "src/modules/VelocityEstimator.h"
 #include "src/drivers/DCMotor.h"
 
-// Phase 4+ includes
+// Stepper and servo control
 #include "src/modules/StepperManager.h"
 #include "src/drivers/StepperMotor.h"
 #include "src/drivers/ServoController.h"
 
-// Phase 5+ includes
+// Sensors and user I/O
 #include "src/modules/SensorManager.h"
 #include "src/modules/UserIO.h"
 #include "src/drivers/IMUDriver.h"
@@ -61,9 +63,7 @@
 // GLOBAL OBJECTS
 // ============================================================================
 
-// Phase 3: DC Motors, Encoders, and Velocity Estimators
-
-// Encoder instances (2x mode for current hardware)
+// Encoder instances (2x or 4x mode per config.h)
 #if ENCODER_1_MODE == ENCODER_2X
 EncoderCounter2x encoder1;
 #else
@@ -94,8 +94,9 @@ EdgeTimeVelocityEstimator velocityEst2;
 EdgeTimeVelocityEstimator velocityEst3;
 EdgeTimeVelocityEstimator velocityEst4;
 
-// DC motor controllers
+// Motor controller arrays
 DCMotor dcMotors[NUM_DC_MOTORS];
+StepperMotor steppers[NUM_STEPPERS];
 
 // ============================================================================
 // TASK CALLBACKS
@@ -142,8 +143,11 @@ void taskDCMotorPID() {
  * Runs every 10ms (100Hz).
  */
 void taskUARTComms() {
-  // Process incoming/outgoing TLV messages
-  MessageCenter::processingTick();
+  // Process incoming TLV messages
+  MessageCenter::processIncoming();
+
+  // Send outgoing telemetry
+  MessageCenter::sendTelemetry();
 
   // Safety timeout check - disable all motors if heartbeat lost
   if (!MessageCenter::isHeartbeatValid()) {
@@ -174,20 +178,13 @@ void taskUARTComms() {
 /**
  * @brief Sensor reading and data transmission (50 Hz, Priority 2)
  *
- * Reads all enabled sensors (IMU, voltage, encoders, etc.).
- * Queues outgoing sensor data packets to Raspberry Pi.
+ * Reads all enabled sensors (IMU, voltage, encoders).
+ * Telemetry transmission handled by MessageCenter.
  * Runs every 20ms (50Hz).
  */
 void taskSensorRead() {
   // Update all sensors
   SensorManager::update();
-
-  // Future: Queue outgoing sensor data to RPi
-  // MessageCenter::sendEncoderData();
-  // MessageCenter::sendVoltageData();
-  // if (IMU_ENABLED) {
-  //   MessageCenter::sendIMUData();
-  // }
 
   // Check for low battery and update status LED
   if (SensorManager::isBatteryLow()) {
@@ -220,12 +217,48 @@ void taskUserIO() {
 }
 
 // ============================================================================
+// ENCODER ISR TRAMPOLINES
+// ============================================================================
+
+/**
+ * @brief Encoder ISR wrappers
+ *
+ * These are minimal ISR wrappers that forward calls to encoder objects.
+ * Encoder ISRs must be global functions (not class methods) to use with
+ * attachInterrupt().
+ */
+
+void encoderISR_M1() {
+#ifdef DEBUG_PINS_ENABLED
+  digitalWrite(DEBUG_PIN_ENCODER_ISR, HIGH);
+#endif
+
+  encoder1.onInterruptA();
+
+#ifdef DEBUG_PINS_ENABLED
+  digitalWrite(DEBUG_PIN_ENCODER_ISR, LOW);
+#endif
+}
+
+void encoderISR_M2() {
+  encoder2.onInterruptA();
+}
+
+void encoderISR_M3() {
+  encoder3.onInterruptA();
+}
+
+void encoderISR_M4() {
+  encoder4.onInterruptA();
+}
+
+// ============================================================================
 // ARDUINO SETUP
 // ============================================================================
 
 void setup() {
   // ------------------------------------------------------------------------
-  // 1. Initialize Debug Serial (USB)
+  // Initialize Debug Serial (USB)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.begin(DEBUG_BAUD_RATE);
   while (!DEBUG_SERIAL && millis() < 2000) {
@@ -234,13 +267,12 @@ void setup() {
 
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println(F("========================================"));
-  DEBUG_SERIAL.println(F("  MAE 162 Robot Firmware v0.5.0"));
-  DEBUG_SERIAL.println(F("  Phase 5: Sensors & User I/O"));
+  DEBUG_SERIAL.println(F("  MAE 162 Robot Firmware v0.6.0"));
   DEBUG_SERIAL.println(F("========================================"));
   DEBUG_SERIAL.println();
 
   // ------------------------------------------------------------------------
-  // 2. Initialize Scheduler (Timer1 @ 1kHz)
+  // Initialize Scheduler (Timer1 @ 1kHz)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing scheduler..."));
   Scheduler::init();
@@ -257,25 +289,25 @@ void setup() {
 #endif
 
   // ------------------------------------------------------------------------
-  // 3. Initialize MessageCenter (UART + TLV)
+  // Initialize Communication (UART + TLV Protocol)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing UART communication..."));
   MessageCenter::init();
 
   // ------------------------------------------------------------------------
-  // Phase 5: Initialize SensorManager
+  // Initialize Sensors (I2C, ADC)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing sensors..."));
   SensorManager::init();
 
   // ------------------------------------------------------------------------
-  // Phase 5: Initialize UserIO (LEDs, Buttons, NeoPixels)
+  // Initialize User I/O (LEDs, Buttons, NeoPixels)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing user I/O..."));
   UserIO::init();
 
   // ------------------------------------------------------------------------
-  // Phase 4: Initialize ServoController (PCA9685)
+  // Initialize Servo Controller (PCA9685)
   // ------------------------------------------------------------------------
 #if SERVO_CONTROLLER_ENABLED
   DEBUG_SERIAL.println(F("[Setup] Initializing servo controller..."));
@@ -284,13 +316,13 @@ void setup() {
 #endif
 
   // ------------------------------------------------------------------------
-  // Phase 4: Initialize StepperManager (Timer3 @ 10kHz)
+  // Initialize Stepper Motors (Timer3 @ 10kHz)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing stepper motors..."));
   StepperManager::init();
 
   // ------------------------------------------------------------------------
-  // Phase 3: Initialize DC Motors and Encoders
+  // Initialize DC Motors and Encoders
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Initializing DC motors and encoders..."));
 
@@ -357,7 +389,7 @@ void setup() {
 #endif
 
   // ------------------------------------------------------------------------
-  // Phase 3: Attach Encoder ISRs
+  // Attach Encoder Interrupts
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Attaching encoder interrupts..."));
 
@@ -382,7 +414,7 @@ void setup() {
 #endif
 
   // ------------------------------------------------------------------------
-  // 3. Register Scheduler Tasks
+  // Register Scheduler Tasks
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Registering scheduler tasks..."));
 
@@ -450,38 +482,6 @@ void loop() {
   // Execute highest-priority ready task
   Scheduler::tick();
 
-  // Future: Add any non-time-critical housekeeping here
-  // (e.g., debug output, watchdog reset, etc.)
-}
-
-// ============================================================================
-// ENCODER ISR TRAMPOLINES (Phase 3)
-// ============================================================================
-
-// These are minimal ISR wrappers that forward calls to encoder objects.
-// Encoder ISRs must be global functions (not class methods) to use with
-// attachInterrupt().
-
-void encoderISR_M1() {
-#ifdef DEBUG_PINS_ENABLED
-  digitalWrite(DEBUG_PIN_ENCODER_ISR, HIGH);
-#endif
-
-  encoder1.onInterruptA();
-
-#ifdef DEBUG_PINS_ENABLED
-  digitalWrite(DEBUG_PIN_ENCODER_ISR, LOW);
-#endif
-}
-
-void encoderISR_M2() {
-  encoder2.onInterruptA();
-}
-
-void encoderISR_M3() {
-  encoder3.onInterruptA();
-}
-
-void encoderISR_M4() {
-  encoder4.onInterruptA();
+  // Note: Non-time-critical housekeeping can be added here
+  // (e.g., watchdog reset, debug output, etc.)
 }

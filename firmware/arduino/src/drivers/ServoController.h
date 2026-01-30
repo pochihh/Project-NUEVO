@@ -35,7 +35,7 @@
 
 #include <Arduino.h>
 #include <stdint.h>
-#include "../../lib/PCA9685.h"
+#include "../lib/PCA9685.h"
 #include "../config.h"
 
 // ============================================================================

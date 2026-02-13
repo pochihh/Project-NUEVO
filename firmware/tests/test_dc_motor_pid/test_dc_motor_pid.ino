@@ -132,13 +132,19 @@ void taskPrintStatus() {
     DEBUG_SERIAL.print(motor1.getVelocity());
     DEBUG_SERIAL.print(F(" t/s, PWM="));
     DEBUG_SERIAL.print(motor1.getPWMOutput());
+    DEBUG_SERIAL.print(F(", I="));
+    DEBUG_SERIAL.print(motor1.getCurrent());
+    DEBUG_SERIAL.print(F("mA"));
 
     DEBUG_SERIAL.print(F("  |  M2: "));
     DEBUG_SERIAL.print(motor2.getPosition());
     DEBUG_SERIAL.print(F(" ticks, "));
     DEBUG_SERIAL.print(motor2.getVelocity());
     DEBUG_SERIAL.print(F(" t/s, PWM="));
-    DEBUG_SERIAL.println(motor2.getPWMOutput());
+    DEBUG_SERIAL.print(motor2.getPWMOutput());
+    DEBUG_SERIAL.print(F(", I="));
+    DEBUG_SERIAL.print(motor2.getCurrent());
+    DEBUG_SERIAL.println(F("mA"));
 }
 
 /**
@@ -255,11 +261,13 @@ void setup() {
     // Initialize motors (with direction flags from config.h)
     motor1.init(0, &encoder1, &velocityEst1, DC_MOTOR_1_DIR_INVERTED);
     motor1.setPins(PIN_M1_EN, PIN_M1_IN1, PIN_M1_IN2);
+    motor1.setCurrentPin(PIN_M1_CT, CURRENT_SENSE_MA_PER_VOLT);  // CT: 0.155 V/A
     motor1.setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
     motor1.setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
 
     motor2.init(1, &encoder2, &velocityEst2, DC_MOTOR_2_DIR_INVERTED);
     motor2.setPins(PIN_M2_EN, PIN_M2_IN1, PIN_M2_IN2);
+    motor2.setCurrentPin(PIN_M2_CT, CURRENT_SENSE_MA_PER_VOLT);  // CT: 0.155 V/A
     motor2.setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
     motor2.setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
 

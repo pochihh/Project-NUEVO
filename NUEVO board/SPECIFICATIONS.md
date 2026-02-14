@@ -646,6 +646,34 @@ pinMode(LIMIT_PIN, INPUT);  // No pullup, sensor drives HIGH/LOW
 | A15 | M3_ENC_B | Motor 3 Encoder B (PCINT15) | Yes | 4x mode via PCINT, relocated from pin 30 (Rev. A) |
 
 
+**DC Motor Control Summary (per motor):**
+| Motor | EN (PWM) | IN1 | IN2 | Encoder A | Encoder B | Current (CT) |
+|-------|----------|-----|-----|-----------|-----------|--------------|
+| 1 | M1_EN (pin 6) | M1_IN1 (pin 8) | M1_IN2 (pin 43) | M1_ENC_A (INT0 / pin 2) | M1_ENC_B (INT1 / pin 3) | M1_CT (A3) |
+| 2 | M2_EN (pin 7) | M2_IN1 (pin 4) | M2_IN2 (pin 30) | M2_ENC_A (INT5 / pin 18) | M2_ENC_B (INT4 / pin 19) | M2_CT (A4) |
+| 3 | M3_EN (pin 9) | M3_IN1 (pin 34) | M3_IN2 (pin 35) | M3_ENC_A (PCINT14 / A14) | M3_ENC_B (PCINT15 / A15) | M3_CT (A5) |
+| 4 | M4_EN (pin 10) | M4_IN1 (pin 36) | M4_IN2 (pin 37) | M4_ENC_A (PCINT5 / pin 11) | M4_ENC_B (PCINT6 / pin 12) | M4_CT (A6) |
+
+**Hardware Interrupts Used:**
+- INT0 (pin 2): M1_ENC_A — Motor 1 Encoder A (Vector 1, highest priority)
+- INT1 (pin 3): M1_ENC_B — Motor 1 Encoder B (Vector 2)
+- INT4 (pin 19): M2_ENC_B — Motor 2 Encoder B (Vector 5)
+- INT5 (pin 18): M2_ENC_A — Motor 2 Encoder A (Vector 6)
+- PCINT0 (pin 11): M4_ENC_A — Motor 4 Encoder A (Vector 9, shared bank)
+- PCINT0 (pin 12): M4_ENC_B — Motor 4 Encoder B (Vector 9, shared bank)
+- PCINT1 (A14): M3_ENC_A — Motor 3 Encoder A (Vector 10, shared bank)
+- PCINT1 (A15): M3_ENC_B — Motor 3 Encoder B (Vector 10, shared bank)
+
+**Key Changes from Rev. A:**
+- M1 and M2 (wheel motors) now use both encoder channels on dedicated INT pins for full 4x quadrature resolution
+- M3 and M4 (manipulator motors) use Pin Change Interrupts (PCINT) for 4x mode, relocated to analog pins (A14/A15) and PWM pins (11/12)
+
+**Serial Ports:**
+- Serial0 (pins 0/1): USB programming/debug
+- Serial2 (pins 16/17 — TX_RPI / RX_RPI): Raspberry Pi communication via level shifter (5V ↔ 3.3V)
+- Serial1 (pins 18/19): NOT AVAILABLE (used by M2_ENC_A / M2_ENC_B encoder interrupts)
+- Serial3 (pins 14/15): NOT AVAILABLE (used by stepper STEP signals ST1_STEP / ST2_STEP)
+
 ### 10.2 Arduino Mega 2560 Pin Allocation [Rev. A]
 **Exposed pins are available on screw terminals/headers for reuse; core comms and default wheel drive pins remain internal.**
 

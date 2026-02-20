@@ -83,7 +83,8 @@ def main():
     script_dir = Path(__file__).parent
     json_file = script_dir / "TLV_TypeDefs.json"
     header_file = script_dir / ".." / "firmware" / "arduino" / "src" / "messages" / "TLV_TypeDefs.h"
-    python_file = script_dir / ".." / "ros2_ws" / "src" / "TLV_TypeDefs.py"
+    # python_file = script_dir / ".." / "ros2_ws" / "src" / "TLV_TypeDefs.py"
+    python_file = script_dir / ".." / "nuevo_ui" / "backend"  / "nuevo_bridge" / "TLV_TypeDefs.py"
     
     # Read JSON file
     if not json_file.exists():

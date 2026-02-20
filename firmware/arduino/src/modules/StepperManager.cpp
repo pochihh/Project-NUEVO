@@ -38,33 +38,25 @@ void StepperManager::init() {
         steppers_[i].init(i);
     }
 
-    // Configure stepper pins based on hardware configuration
-#if STEPPER_1_ENABLED
+    // Configure stepper pins
     steppers_[0].setPins(PIN_ST1_STEP, PIN_ST1_DIR, PIN_ST1_EN);
 #if defined(PIN_ST1_LIMIT)
     steppers_[0].setLimitPin(PIN_ST1_LIMIT, LIMIT_ACTIVE_LOW ? LOW : HIGH);
 #endif
-#endif
 
-#if STEPPER_2_ENABLED
     steppers_[1].setPins(PIN_ST2_STEP, PIN_ST2_DIR, PIN_ST2_EN);
 #if defined(PIN_ST2_LIMIT)
     steppers_[1].setLimitPin(PIN_ST2_LIMIT, LIMIT_ACTIVE_LOW ? LOW : HIGH);
 #endif
-#endif
 
-#if STEPPER_3_ENABLED
     steppers_[2].setPins(PIN_ST3_STEP, PIN_ST3_DIR, PIN_ST3_EN);
 #if defined(PIN_ST3_LIMIT)
     steppers_[2].setLimitPin(PIN_ST3_LIMIT, LIMIT_ACTIVE_LOW ? LOW : HIGH);
 #endif
-#endif
 
-#if STEPPER_4_ENABLED
     steppers_[3].setPins(PIN_ST4_STEP, PIN_ST4_DIR, PIN_ST4_EN);
 #if defined(PIN_ST4_LIMIT)
     steppers_[3].setLimitPin(PIN_ST4_LIMIT, LIMIT_ACTIVE_LOW ? LOW : HIGH);
-#endif
 #endif
 
     // ========================================================================
@@ -127,22 +119,10 @@ void StepperManager::timerISR() {
     digitalWrite(DEBUG_PIN_STEPPER_ISR, HIGH);
 #endif
 
-    // Call timerCallback on each enabled stepper
-#if STEPPER_1_ENABLED
-    steppers_[0].timerCallback();
-#endif
-
-#if STEPPER_2_ENABLED
-    steppers_[1].timerCallback();
-#endif
-
-#if STEPPER_3_ENABLED
-    steppers_[2].timerCallback();
-#endif
-
-#if STEPPER_4_ENABLED
-    steppers_[3].timerCallback();
-#endif
+    // Call timerCallback on all stepper channels
+    for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
+        steppers_[i].timerCallback();
+    }
 
 #ifdef DEBUG_PINS_ENABLED
     digitalWrite(DEBUG_PIN_STEPPER_ISR, LOW);

@@ -1,234 +1,288 @@
 # Arduino Firmware
 
-This directory contains the Arduino firmware for low-level real-time control and sensor integration on a differential drive robot platform.
-Arduino Mega 2560 is used as the microcontroller, acting as a slave device to a Raspberry Pi master via UART using a custom TLV (Type-Length-Value) protocol.
+This directory contains the Arduino Mega 2560 firmware for the MAE 162 robot platform. The firmware handles all real-time control: motor PWM, encoder counting, sensor reading, and communication with the Raspberry Pi over a custom TLV (Type-Length-Value) protocol.
 
-Refer to [implementation.md](implementation.md) for detailed module descriptions and architecture notes.
-Refer to [pin_table.md](pin_table.md) for the complete GPIO mapping.
-Refer to [technical_notes.md](technical_notes.md) for low-level technical details on timers, interrupts, and design rationale.
+## Directory Structure
 
-## Key features
-1. The firmware uses the tlvcodec protocol over UART to communicate with the Raspberry Pi
-2. Controls up to 4 DC motors with quadrature encoders (A/B phase) and current sensing (via ADC inputs)
-3. Controls up to 4 stepper motors with STEP/DIR/ENABLE signals
-4. I2C bus for Qwiic sensors and PCA9685 PWM driver for servos
-5. User buttons, limit switches, user LEDs, and one status RGB LED (WS2812B NeoPixel, can be extended)
-6. Battery voltage and 5V/servo rail voltage monitoring via ADC inputs
+```
+firmware/
+├── arduino/                  # Main firmware sketch (upload this to the robot)
+│   ├── arduino.ino           # Entry point (setup/loop)
+│   └── src/                  # All firmware source code
+│       ├── config.h          # Compile-time configuration (edit this first)
+│       ├── pins.h            # All GPIO pin definitions
+│       ├── drivers/          # Hardware abstractions
+│       │   ├── DCMotor       # H-bridge PWM + direction control
+│       │   ├── StepperMotor  # STEP/DIR/ENABLE stepper driver interface
+│       │   ├── ServoController  # PCA9685 I2C servo controller
+│       │   ├── UARTDriver    # TLV-framed serial comms (RPi link)
+│       │   ├── NeoPixelDriver   # WS2812B RGB status LED
+│       │   ├── IMUDriver     # ICM-20948 9-DoF IMU
+│       │   ├── LidarDriver   # Garmin LIDAR-Lite v4 (I2C)
+│       │   └── UltrasonicDriver # SparkFun Qwiic HC-SR04 (I2C)
+│       ├── modules/          # Higher-level subsystems
+│       │   ├── EncoderCounter   # Interrupt-driven quadrature counting (2x/4x)
+│       │   ├── VelocityEstimator # Edge-timing velocity with moving-average filter
+│       │   ├── SensorManager    # IMU fusion (Madgwick AHRS) + mag calibration
+│       │   ├── PersistentStorage # EEPROM read/write (wheel geometry, mag cal)
+│       │   ├── MessageCenter    # TLV packet assembly and dispatch
+│       │   ├── StepperManager   # Multi-motor step sequencing (Timer3 ISR)
+│       │   └── UserIO           # Buttons, LEDs, NeoPixel patterns
+│       └── lib/              # Vendored third-party libraries
+│           ├── Fusion/       # Madgwick AHRS (x-io Technologies)
+│           ├── tlvcodec      # TLV packet encoder/decoder
+│           ├── PCA9685       # I2C PWM driver
+│           ├── Adafruit_NeoPixel
+│           ├── SparkFun_9DoF_IMU_Breakout (ICM-20948)
+│           ├── SparkFun_Garmin_LIDAR-Lite_v4
+│           ├── SparkFun_Qwiic_Ultrasonic
+│           └── SparkFun_Toolkit  # SparkFun sfTk dependency
+├── tests/                    # Standalone test sketches
+│   ├── test_scheduler/
+│   ├── test_uart_tlv/
+│   ├── test_encoder/
+│   ├── test_dc_motor_pwm/
+│   ├── test_dc_motor_pid/
+│   ├── test_current_sensing/
+│   ├── test_servo/
+│   ├── test_stepper/
+│   ├── test_user_io/
+│   ├── test_voltage/
+│   ├── test_eeprom/
+│   └── test_i2c_scanner/
+├── notes/                    # Design notes and analysis
+│   ├── REV_A_TO_REV_B_CHANGES.md
+│   ├── TIMER3_CONFLICT_ANALYSIS.md
+│   └── technical_notes.md
+├── pin_table_rev_A.md        # Complete GPIO mapping — PCB Rev. A
+└── pin_table_rev_B.md        # Complete GPIO mapping — PCB Rev. B (in testing)
+```
 
-## Firmware Operation
-- At startup, all sensors are initialized and all motors are disabled.
-- After receiving the `MOTOR_ENABLE` command, the specified motors are enabled.
-- The firmware continuously reads sensor data and sends it to the Raspberry Pi at a globally configurable update rate.
-- The firmware listens for control commands (motor, stepper, servos, etc.) from the Raspberry Pi and executes them in real-time.
-- **Safety timeout**: If no command is received from the Raspberry Pi for 50ms (default), all motors are automatically disabled. This timeout is configurable in the firmware header file.
+## Features
 
-## Sensors
-- **Voltage monitors**:
-    - Battery voltage (via resistor divider)
-    - Servo rail voltage (via resistor divider)
-    - Motor current sense (CT) for each DC motor (used for torque control)
-- **Quadrature encoders**: A/B phase encoder for each DC motor
-- **User buttons**: 10 on-board buttons with INPUT_PULLUP
-    - *Note: 8 of these (BTN3-BTN10) share GPIO pins with limit switch inputs and can be configured as limit switches in firmware*
-- **Qwiic-compatible sensors** (via I2C bus):
-    - Supports IMU, ultrasonic rangefinder, environmental sensors, etc.
-    - Codebase includes a template interface for adding new Qwiic sensors
-
-## Motor Control
+### Communication
+- **TLV protocol** over UART at 1 Mbps (Serial2, pins 16/17 via level shifter)
+- Bidirectional: RPi sends commands, Arduino sends sensor data and status
+- CRC-checked frames; hardware safety timeout (500 ms, motors auto-disable)
+- Debug output on USB Serial (Serial0) at 115200 baud
 
 ### DC Motors (4 channels)
-- Controlled via PWM (EN pin) for speed and digital signals (IN1/IN2) for direction
-- **Cascade PID control** with encoder and current feedback:
-    - **Position → Velocity → Torque** control (full cascade, if current sensing is reliable)
-    - **Position → Velocity** control (fallback option)
-    - PID gains are **runtime configurable** via TLV commands
+- H-bridge control via PWM (speed) + digital direction signals
+- Interrupt-driven quadrature encoder counting: **2x mode** (phase A only) or **4x mode** (both phases)
+- Edge-timing velocity estimator with configurable moving-average filter
+- **Cascade PID**: Position → Velocity → Torque (inner torque loop requires current sensing)
+- All PID gains runtime-configurable via TLV commands
+- Per-motor direction inversion (corrects for reversed wiring)
 
 ### Stepper Motors (4 channels)
-- Supports A4988 and DRV8825 stepper drivers
-- Controlled via STEP/DIR/ENABLE signals through external stepper driver modules
-- **Open-loop control** (position tracked by step counting, no encoder feedback)
-- Supports microstepping (configured on the driver module)
-- Can be associated with limit switches for homing (configured in firmware header file)
+- STEP/DIR/ENABLE interface compatible with A4988 / DRV8825 drivers
+- Timer3 ISR at 10 kHz for precise pulse generation (up to 5000 steps/sec)
+- Trapezoidal acceleration profiling
+- Limit switch homing support
+- Individual enable/disable per channel
 
-### Servos (via PCA9685 I2C PWM driver)
-- Simple command interface to set servo positions
+### Servos (PCA9685)
+- Up to 16 servo channels via I2C PWM controller
+- Simple position command interface (angle or pulse width)
 
-## Configuration
+### IMU — ICM-20948 9-DoF
+- 3-axis accelerometer (mg), gyroscope (DPS), magnetometer (µT)
+- **Madgwick AHRS** sensor fusion via Fusion library (x-io Technologies)
+- Outputs: quaternion, Euler angles, earth-frame linear acceleration
+- 9-DoF mode (with magnetometer) or 6-DoF fallback if uncalibrated
+- **Magnetometer hard-iron calibration**: interactive calibration command, stored to EEPROM
+- IMU update rate: 100 Hz
 
-Most firmware parameters are configured via a **header file** at compile time:
-- Number of active motors, steppers, and servos
-- Which sensors are enabled
-- Safety timeout duration (default 50ms)
-- Sensor update rate
-- Stepper-to-limit-switch associations
+### Distance Sensors (I2C via Qwiic)
+- **Garmin LIDAR-Lite v4**: 5 cm – 10 m, ~1 cm resolution, up to 4 sensors, 50 Hz
+- **SparkFun Qwiic Ultrasonic (HC-SR04)**: 2 cm – 400 cm, ~3 mm accuracy, up to 4 sensors, 15 Hz
+- Sensor counts and I2C addresses configured in `config.h`
 
-**Runtime configurable** (via TLV commands):
-- PID gains for DC motor control
+### Voltage Monitoring
+- Battery voltage (1:6 divider, 0–24 V range) at 10 Hz
+- 5V rail and servo rail monitors
+- Per-motor current sense (ADC) for torque feedback
 
-## Threads
-- **Main loop**: Housekeeping tasks and debug output to serial monitor (UART0)
-- **UART thread**: Real-time communication with Raspberry Pi (UART2)
-- **DC Motor control**: PID loop execution, PWM generation, encoder reading, current sensing
-- **Stepper Motor control**: Step pulse generation with STEP/DIR/ENABLE signals
-- **Servo control**: I2C communication with PCA9685
-- **Sensor thread**: Periodic reading of all enabled sensors
+### Persistent Storage (EEPROM)
+- Survives power-off; ~100,000 write cycles per byte
+- Stores: wheel diameter, wheel base, magnetometer calibration offsets
+- API: `PersistentStorage::init()` / `get*` / `set*` (see `src/modules/PersistentStorage.h`)
 
-## TLV Protocol
+### User I/O
+- 2 on-board push-buttons (INPUT_PULLUP)
+- 8 shared limit switch / button inputs (JST XH 3-pin connectors, pins 40–41, 48–53)
+- Status RGB LED: WS2812B NeoPixel (pin 42) — system state patterns
+- 3 user LEDs: green (pin 44), blue (pin 45), orange (pin 46) — PWM brightness control
+- 1 user LED: purple (pin 47) — digital only
 
-Commands are sent from Raspberry Pi (master) to Arduino (slave). Responses and sensor data are sent from Arduino to Raspberry Pi.
+### Scheduler
+- Timer1-based cooperative scheduler at 1 kHz base tick
+- Configurable per-task frequencies (see `config.h`):
 
-### SYSTEM `0x001-0x0FF`
-| Command | Direction | Description |
-|---------|-----------|-------------|
-| `SYS_HEARTBEAT` | RPi → Arduino | Watchdog heartbeat. Must be sent within timeout period (default 50ms) to keep motors enabled. |
-| `SYS_STATUS` | Arduino → RPi | Reports system status: enabled motors, error flags, voltage levels, uptime. |
-| `SYS_SET_PID` | RPi → Arduino | Set PID gains for a specific DC motor (runtime configurable). |
-| `SYS_GET_PID` | RPi → Arduino | Request current PID gains for a specific DC motor. |
-| `SYS_RES_PID` | Arduino → RPi | Returns the requested PID gains. |
+| Task | Default Rate |
+|------|-------------|
+| DC motor PID | 200 Hz |
+| UART comms | 100 Hz |
+| IMU reading | 100 Hz |
+| LIDAR reading | 50 Hz |
+| UserIO (LEDs/buttons) | 20 Hz |
+| Ultrasonic reading | 15 Hz |
+| Voltage monitoring | 10 Hz |
 
-### MOTORS `0x100-0x3FF`
-| Command | Direction | Description |
-|---------|-----------|-------------|
-| `DC_ENABLE` | RPi → Arduino | Enable/disable specific DC motors. Motors start disabled on boot. |
-| `DC_SET_POSITION` | RPi → Arduino | Set target position for a DC motor. Implicitly switches to position control mode. Motor holds position until disabled. |
-| `DC_SET_VELOCITY` | RPi → Arduino | Set target velocity for a DC motor. Implicitly switches to velocity control mode. |
-| `DC_STATUS` | Arduino → RPi | Reports DC motor state: position (encoder ticks), velocity, current draw, control mode. |
-| `STEP_ENABLE` | RPi → Arduino | Enable/disable specific stepper motors. Motors start disabled on boot. |
-| `STEP_SET_ACCEL` | RPi → Arduino | Set acceleration/deceleration rate for a specific stepper motor (runtime configurable). |
-| `STEP_SET_VEL` | RPi → Arduino | Set maximum velocity for a specific stepper motor (runtime configurable). |
-| `STEP_MOVE` | RPi → Arduino | Command stepper to move a specified number of steps. Uses configured velocity/acceleration. |
-| `STEP_HOME` | RPi → Arduino | Command stepper to home using associated limit switch. |
-| `STEP_STATUS` | Arduino → RPi | Reports stepper state: current position (step count), moving/idle, limit switch triggered. |
-| `SERVO_ENABLE` | RPi → Arduino | Enable/disable the PCA9685 servo driver. Starts disabled on boot. |
-| `SERVO_SET` | RPi → Arduino | Set servo position (pulse width or angle) for a specific channel. |
+---
 
-### SENSORS `0x400-0x4FF`
-Sensor data is sent as separate packets grouped by sensor type. If multiple sensors of the same type are connected (e.g., two IMUs), their data is combined into a single packet.
+## Pin Tables
 
-| Command | Direction | Description |
-|---------|-----------|-------------|
-| `SENSOR_VOLTAGE` | Arduino → RPi | Battery voltage, servo rail voltage, 5V rail status. |
-| `SENSOR_ENCODER` | Arduino → RPi | Encoder data for all DC motors: position (ticks), velocity (ticks/sec). |
-| `SENSOR_CURRENT` | Arduino → RPi | Motor current readings (CT) for all DC motors. |
-| `SENSOR_IMU` | Arduino → RPi | IMU data (if connected): acceleration, gyroscope, orientation. Multiple IMUs in one packet. |
-| `SENSOR_RANGE` | Arduino → RPi | Ultrasonic rangefinder distance readings (if connected). Multiple sensors in one packet. |
+Two PCB revisions are supported. The firmware selects pins from `pins.h`:
 
-### USER IO `0x500-0x5FF`
-| Command | Direction | Description |
-|---------|-----------|-------------|
-| `IO_SET_LED` | RPi → Arduino | Set state of user LEDs (blue, orange, purple). Supports on/off, PWM brightness, and blink/breathing patterns. |
-| `IO_SET_NEOPIXEL` | RPi → Arduino | Set NeoPixel RGB LED color and patterns. The fisrt pixel is the top-most pixel (ID 0). The user can still control the first pixel, but its behavior will be overridden by the system status (e.g. red when battery is low). |
-| `IO_BUTTON_STATE` | Arduino → RPi | Reports current state of all 10 user buttons (active low). |
-| `IO_LIMIT_STATE` | Arduino → RPi | Reports state of limit switches (only pins configured as limit switch mode). |
+- **[Rev. A](pin_table_rev_A.md)** — current production board (2x encoder mode for M3/M4)
+- **[Rev. B](pin_table_rev_B.md)** — in testing; full 4x quadrature on all motors via PCINT
 
-## GPIO Pin Assignment Table
-**Exposed pins are available on screw terminals/headers for reuse; core comms and default wheel drive pins remain internal.**
+> **Migration note:** Rev. B is not fully validated yet. Do not switch `pins.h` to Rev. B until hardware testing is complete. See [notes/REV_A_TO_REV_B_CHANGES.md](notes/REV_A_TO_REV_B_CHANGES.md) for the complete pin remapping rationale.
 
-| Pin(s) | Pin Name | Function | Exposed? | Notes | *Pin Modification [REV. B] |
-|--------|----------|----------|----------|-------|-------------------|
-| 0 (RX0) | RX0 | USB Serial | No | Programming/debug only |
-| 1 (TX0) | TX0 | USB Serial | No | Programming/debug only |
-| 2 (INT0) | M1_ENC_A | Motor 1 Encoder A | No | Default left/right wheel encoder A |
-| 3 (INT1) | ~~M2_ENC_A~~ | Motor 2 Encoder A | No | Default left/right wheel encoder A | M1_ENC_B |
-| 4 | ~~M1_ENC_B~~ | Motor 1 Encoder B | No | Default wheel encoder B | M2_IN1 |
-| 5 (PWM) | ~~M1_EN~~ | Motor 1 EN | No | Default wheel PWM | LED_RED |
-| 6 (PWM Timer 4) | ~~M2_EN~~ | Motor 2 EN | No | Default wheel PWM | M1_EN |
-| 7 (PWM Timer 4)| ~~M2_ENC_B~~ | Motor 2 Encoder B | No | Default wheel encoder B | M2_EN |
-| 8 (PWM) | M1_IN1 | Motor 1 IN1 | No | Default wheel direction |
-| 9 (PWM, timer 2) | M3_EN | Motor 3 EN | Yes | PWM-capable |
-| 10 (PWM, timer 2) | M4_EN | Motor 4 EN | Yes | PWM-capable |  |
-| 11 (PWM) | ~~LED_RED~~ | Status LED Red | No -> Yes | Error/low battery indicator | M4_ENC_A |
-| 12 | ~~M2_IN1~~ | Motor 2 IN1 | No -> Yes | Default wheel direction | M4_ENC_B |
-| 13 | ~~M2_IN2~~ | Motor 2 IN2 | No -> Yes | Default wheel direction | USER_P13 |
-| 14 | ST1_STEP | Stepper 1 STEP | Yes | Stepper control |
-| 15 | ST2_STEP | Stepper 2 STEP | Yes | Stepper control |
-| 16 (TX2) | TX_RPI | **UART to RPi5** | No | Via level shifter (5V → 3.3V) |
-| 17 (RX2) | RX_RPI | **UART from RPi5** | No | Via level shifter (3.3V → 5V) |
-| 18 (INT5) | ~~M3_ENC_A~~ | Motor 3 Encoder A | Yes _> No | Interrupt-capable | M2_ENC_A |
-| 19 (INT4) | ~~M4_ENC_A~~ | Motor 4 Encoder A | Yes -> No | Interrupt-capable | M2_ENC_B |
-| 20 (SDA) | SDA | I2C Data | Yes | Qwiic + PCA9685 module |
-| 21 (SCL) | SCL | I2C Clock | Yes | Qwiic + PCA9685 module |
-| 22 | ST1_DIR | Stepper 1 DIR | Yes | Stepper direction |
-| 23 | ST2_DIR | Stepper 2 DIR | Yes | Stepper direction |
-| 24 | ST3_DIR | Stepper 3 DIR | Yes | Stepper direction |
-| 25 | ST4_DIR | Stepper 4 DIR | Yes | Stepper direction |
-| 26 | ST1_EN | Stepper 1 ENABLE | Yes | Individual enable |
-| 27 | ST2_EN | Stepper 2 ENABLE | Yes | Individual enable |
-| 28 | ST3_EN | Stepper 3 ENABLE | Yes | Individual enable |
-| 29 | ST4_EN | Stepper 4 ENABLE | Yes | Individual enable |
-| 30 | ~~M3_ENC_B~~ | Motor 3 Encoder B | Yes -> No | Quadrature input | M2_IN2 |
-| 31 | ~~M4_ENC_B~~ | Motor 4 Encoder B | Yes | Quadrature input | USER_P31 |
-| 32 | ST3_STEP | Stepper 3 STEP | Yes | Stepper control |
-| 33 | ST4_STEP | Stepper 4 STEP | Yes | Stepper control |
-| 34 | M3_IN1 | Motor 3 IN1 | Yes | Direction |
-| 35 | M3_IN2 | Motor 3 IN2 | Yes | Direction |
-| 36 | M4_IN1 | Motor 4 IN1 | Yes | Direction |
-| 37 | M4_IN2 | Motor 4 IN2 | Yes | Direction |
-| 38 | BTN1 | User Button 1 | No | On-board only, INPUT_PULLUP |
-| 39 | BTN2 | User Button 2 | No | On-board only, INPUT_PULLUP |
-| 40 | LIM1 / BTN3 | Limit Switch 1 / Button 3 | Yes | JST XH 3-pin (V, S, G) |
-| 41 | LIM2 / BTN4 | Limit Switch 2 / Button 4 | Yes | JST XH 3-pin (V, S, G) |
-| 42 | NEOPIXEL_DIN | WS2812B RGB LED Data | No | NeoPixel control |
-| 43 | M1_IN2 | Motor 1 IN2 | No | Default wheel direction |
-| 44 (PWM) | LED_GREEN | Status LED Green | No | System OK (default) |
-| 45 (PWM) | LED_BLUE | User LED Blue | Yes | Exposed for user |
-| 46 (PWM) | LED_ORANGE | User LED Orange | Yes | Exposed for user |
-| 47 | LED_PURPLE | User LED Purple | Yes | Exposed for user (non-PWM) |
-| 48 | LIM3 / BTN5 | Limit Switch 3 / Button 5 | Yes | JST XH 3-pin (V, S, G) |
-| 49 | LIM4 / BTN6 | Limit Switch 4 / Button 6 | Yes | JST XH 3-pin (V, S, G) |
-| 50 | LIM5 / BTN7 | Limit Switch 5 / Button 7 | Yes | JST XH 3-pin (V, S, G) |
-| 51 | LIM6 / BTN8 | Limit Switch 6 / Button 8 | Yes | JST XH 3-pin (V, S, G) |
-| 52 | LIM7 / BTN9 | Limit Switch 7 / Button 9 | Yes | JST XH 3-pin (V, S, G) |
-| 53 | LIM8 / BTN10 | Limit Switch 8 / Button 10 | Yes | JST XH 3-pin (V, S, G) |
-| A0 | VBAT_SENSE | Battery Voltage Monitor | No | Divider 1:6 on BAT_IN |
-| A1 | V5_SENSE | 5V Rail Monitor | No | Divider 1:2 after 5V buck |
-| A2 | VSERVO_SENSE | Servo Rail Monitor | No | Divider 1:3 servo rail |
-| A3 | M1_CT | Motor 1 Current Sense (CT) | No | H-bridge feedback |
-| A4 | M2_CT | Motor 2 Current Sense (CT) | No | H-bridge feedback |
-| A5 | M3_CT | Motor 3 Current Sense (CT) | Yes | H-bridge feedback |
-| A6 | M4_CT | Motor 4 Current Sense (CT) | Yes | H-bridge feedback |
-| *A7-A13 | ANALOG_EXP | Analog Expansion | Yes | Available for sensors |
-| *A14 | ~~ANALOG_EXP~~ | Analog Expansion | Yes | | M3_ENC_A |
-| *A15 | ~~ANALOG_EXP~~ | Analog Expansion | Yes | | M3_ENC_B |
+---
 
+## Building and Uploading
 
-**DC Motor Control Summary (per motor) [REV. B]:**
-| Motor | EN (PWM) | IN1 | IN2 | Encoder A | Encoder B | Current (CT) |
-|-------|----------|-----|-----|-----------|-----------|--------------|
-| 1 | Pin 6 | Pin 8 | Pin 43 | Pin 2 (INT0) | Pin 3 (INT1) | A3 |
-| 2 | Pin 7 | Pin 4 | Pin 30 | Pin 18 (INT5) | Pin 19 (INT4) | A4 |
-| 3 | Pin 9 | Pin 34 | Pin 35 | A14 (PCINT) | A15 (PCINT) | A5 |
-| 4 | Pin 10 | Pin 36 | Pin 37 | Pin 11 (PCINT) | Pin 12 (PCINT) | A6 |
+### Prerequisites
 
-**Hardware Interrupts Used [REV. B]:**
+Install **Arduino IDE 2.x** or **arduino-cli**. Required board package:
+- `arduino:avr` (Arduino AVR Boards) — install via Board Manager, target: **Arduino Mega 2560**
 
-*External Interrupts (INT) - Highest Priority:*
-- INT0 (Pin 2): Motor 1 Encoder A
-- INT1 (Pin 3): Motor 1 Encoder B
-- INT5 (Pin 18): Motor 2 Encoder A
-- INT4 (Pin 19): Motor 2 Encoder B
+Required libraries are vendored in `src/lib/` — no Library Manager installs needed.
 
-*Pin Change Interrupts (PCINT) - Lower Priority (optional 4x mode):*
-- PCINT0 (Pins 11, 12): Motor 4 Encoder A/B
-- PCINT1 (A14, A15): Motor 3 Encoder A/B
+### Arduino IDE
 
-**4x Encoder Resolution Support:**
-| Motor | 4x Mode | Interrupt Type | Notes |
-|-------|---------|----------------|-------|
-| M1 (Wheel) | ✅ Full | External INT | Both channels on INT0/INT1 |
-| M2 (Wheel) | ✅ Full | External INT | Both channels on INT4/INT5 |
-| M3 (Manip) | ⚠️ Optional | PCINT | Lower priority, 2x default |
-| M4 (Manip) | ⚠️ Optional | PCINT | Lower priority, 2x default |
+1. Open `firmware/arduino/arduino.ino`
+2. Select **Tools → Board → Arduino Mega 2560**
+3. Select the correct COM/serial port
+4. Click **Upload** (Ctrl+U / ⌘U)
 
-**Serial Ports:**
-- Serial0 (pins 0/1): USB programming/debug
-- Serial2 (pins 16/17): Raspberry Pi communication via level shifter
-- Serial1 (pins 18/19): NOT AVAILABLE (used for encoder interrupts)
-- Serial3 (pins 14/15): NOT AVAILABLE (used for stepper STEP signals)
+### arduino-cli
 
-## Know issues
-### Stepper motor
-- When a stepper is disabled in config.h, the StepperMotor won't be able show the user that it's disabled in the config.h. 
-- 
+```bash
+cd firmware/arduino
+arduino-cli compile --fqbn arduino:avr:mega .
+arduino-cli upload  --fqbn arduino:avr:mega --port /dev/ttyUSB0 .
+```
 
+Replace `/dev/ttyUSB0` with your port (`/dev/tty.usbmodem*` on macOS, `COM3` on Windows).
 
+### Configuration
+
+Edit `src/config.h` before building:
+- Enable/disable motors, sensors, servo controller
+- Set UART baud rate, heartbeat timeout, PID defaults
+- Set `IMU_ENABLED`, `LIDAR_COUNT`, `ULTRASONIC_COUNT`
+- Set `ENCODER_N_MODE` per motor (`ENCODER_2X` or `ENCODER_4X`)
+
+---
+
+## Test Sketches
+
+Each test in `firmware/tests/` is a standalone Arduino sketch that exercises one subsystem. Tests share the firmware source tree via a **symbolic link** (`src → ../../arduino/src`) — this is the standard Arduino IDE workaround for sharing source files across sketches.
+
+### The `src` Symlink
+
+The Arduino IDE requires all source files to be inside the sketch folder. Each test directory contains a `src` symlink that points to the shared firmware source at `firmware/arduino/src/`. You must create this symlink after cloning the repo — it is **not stored in git**.
+
+#### Create symlinks — macOS / Linux
+
+```bash
+cd firmware/tests
+for dir in test_*/; do
+    ln -sf ../../arduino/src "$dir/src"
+done
+```
+
+Verify:
+```bash
+ls -la firmware/tests/test_scheduler/src
+# Should show: src -> ../../arduino/src
+```
+
+#### Create symlinks — Windows (PowerShell, run as Administrator)
+
+```powershell
+cd firmware\tests
+Get-ChildItem -Directory -Filter "test_*" | ForEach-Object {
+    $target = Resolve-Path "..\..\arduino\src"
+    $link   = Join-Path $_.FullName "src"
+    New-Item -ItemType Junction -Path $link -Target $target -Force
+}
+```
+
+> **Note:** Windows uses a **directory junction** instead of a symlink. Junctions work the same way with the Arduino IDE. You must run PowerShell as Administrator.
+
+#### Verify symlinks exist
+
+```bash
+# macOS / Linux
+ls -la firmware/tests/*/src
+
+# Windows PowerShell
+Get-ChildItem firmware\tests\test_*\src | Select-Object FullName, Target
+```
+
+### Building and Running a Test
+
+#### Arduino IDE
+
+1. Open the desired test sketch (e.g., `firmware/tests/test_encoder/test_encoder.ino`)
+2. Verify the `src` symlink exists in that folder
+3. Set board to **Arduino Mega 2560** and select your port
+4. Click **Upload**, then open **Serial Monitor** at 115200 baud
+
+#### arduino-cli
+
+```bash
+# macOS / Linux
+arduino-cli compile --fqbn arduino:avr:mega firmware/tests/test_encoder
+arduino-cli upload  --fqbn arduino:avr:mega --port /dev/ttyUSB0 firmware/tests/test_encoder
+
+# Windows PowerShell
+arduino-cli compile --fqbn arduino:avr:mega firmware\tests\test_encoder
+arduino-cli upload  --fqbn arduino:avr:mega --port COM3 firmware\tests\test_encoder
+```
+
+### Test Index
+
+| Test | What it tests | Serial Monitor |
+|------|---------------|----------------|
+| `test_scheduler` | Timer1 1kHz scheduler, task timing accuracy | 115200 baud |
+| `test_uart_tlv` | TLV packet encode/decode, loopback (TX→RX jumper needed) | 115200 baud |
+| `test_encoder` | Quadrature encoder counting (2x/4x), direction, velocity | 115200 baud |
+| `test_dc_motor_pwm` | Direct PWM motor control, H-bridge direction | 115200 baud |
+| `test_dc_motor_pid` | Closed-loop PID velocity and position control | 115200 baud |
+| `test_current_sensing` | ADC current sensor readings per motor | 115200 baud |
+| `test_servo` | PCA9685 servo commands, angle sweep | 115200 baud |
+| `test_stepper` | Stepper STEP/DIR pulses, acceleration, limit switch homing | 115200 baud |
+| `test_user_io` | Buttons, LEDs (PWM/blink/breathing), NeoPixel colors | 115200 baud |
+| `test_voltage` | ADC battery/rail voltage readings | 115200 baud |
+| `test_eeprom` | EEPROM read/write; power-cycle persistence demo | 115200 baud |
+| `test_i2c_scanner` | Scans I2C bus and prints all detected addresses | 115200 baud |
+
+### `test_eeprom` — Power-Cycle Demo
+
+This test teaches EEPROM persistence to students who have never used non-volatile memory:
+
+1. **Run 1**: Writes known values (wheel diameter, wheel base, mag offsets) → verifies immediate read-back → instructs you to power off
+2. **Run 2** (after power cycle): Reads values back → confirms data survived → **proves EEPROM is non-volatile**
+
+Serial commands while running:
+- `d` — dump raw EEPROM bytes with field annotations
+- `r` — erase all stored data (next boot = Run 1)
+- `w` — write test values again
+- `h` — help
+
+---
+
+## Known Issues
+
+### Rev. B — LED_RED PWM conflict (Timer 3)
+
+Rev. B moves `LED_RED` from pin 11 (Timer 1) to pin 5 (Timer 3). Timer 3 is already used for stepper pulse generation in CTC mode. **PWM brightness/breathing on LED_RED is not available in Rev. B** — only ON/OFF control works. See [notes/TIMER3_CONFLICT_ANALYSIS.md](notes/TIMER3_CONFLICT_ANALYSIS.md) for full analysis.
+
+### EEPROM unused warning
+
+The compiler emits `'EEPROM' defined but not used` from Arduino's `EEPROM.h` when included in translation units that don't call EEPROM functions directly. This is a harmless upstream header issue and does not affect behavior.

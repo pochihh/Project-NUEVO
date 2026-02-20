@@ -4,8 +4,7 @@
  */
 
 #include "NeoPixelDriver.h"
-// #include "../../lib/Adafruit_NeoPixel.h"
-#include <Adafruit_NeoPixel.h>
+#include "../lib/Adafruit_NeoPixel.h"
 
 // ============================================================================
 // CONSTRUCTOR / DESTRUCTOR

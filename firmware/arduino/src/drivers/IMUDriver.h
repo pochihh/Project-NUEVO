@@ -1,32 +1,28 @@
 /**
  * @file IMUDriver.h
- * @brief Wrapper for ICM-20948 9-axis IMU
+ * @brief Wrapper for ICM-20948 9-DoF IMU (SparkFun library)
  *
- * This module provides a simplified interface to the ICM-20948 IMU sensor.
- * The ICM-20948 combines:
- * - 3-axis accelerometer
- * - 3-axis gyroscope
- * - 3-axis magnetometer (AK09916)
- *
- * Features:
- * - I2C communication (address 0x68 or 0x69)
- * - Configurable accelerometer range (±2g, ±4g, ±8g, ±16g)
- * - Configurable gyroscope range (±250, ±500, ±1000, ±2000 dps)
- * - Digital Motion Processor (DMP) support (future)
+ * Provides a simplified interface to the ICM-20948 combining:
+ * - 3-axis accelerometer (output in mg)
+ * - 3-axis gyroscope (output in DPS)
+ * - 3-axis magnetometer / AK09916 (output in µT)
  * - Temperature sensor
  *
- * Hardware Connection:
- * - SDA/SCL: I2C bus (shared with other I2C devices)
- * - INT: Interrupt pin (optional, for data ready signal)
- * - VCC: 3.3V or 5V (internal LDO for 3.3V logic)
+ * This driver does NOT use the DMP. Sensor fusion is handled externally
+ * by FusionWrapper (Madgwick AHRS from the Fusion library).
+ *
+ * Magnetometer calibration offsets can be set via setMagOffset() and are
+ * subtracted from each magnetometer reading before output.
  *
  * Usage:
  *   IMUDriver imu;
- *   imu.init();
+ *   imu.init(IMU_AD0_VAL);          // AD0_VAL: 0=0x68, 1=0x69
  *
- *   float accel[3], gyro[3];
- *   if (imu.readAccelGyro(accel, gyro)) {
- *       // Process IMU data
+ *   if (imu.dataReady()) {
+ *       imu.update();               // reads getAGMT() from hardware
+ *       float ax = imu.getAccX();   // mg
+ *       float gx = imu.getGyrX();   // DPS
+ *       float mx = imu.getMagX();   // µT (offset applied)
  *   }
  */
 
@@ -34,152 +30,128 @@
 #define IMUDRIVER_H
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <stdint.h>
 #include "../config.h"
 
-// Forward declaration - only include if IMU is enabled and library is available
 #if IMU_ENABLED
-  // Note: ICM_20948 library requires util/ICM_20948_C.h
-  // If library is not fully installed, IMU functionality will be disabled
-  #ifdef ICM_20948_H_
-    class ICM_20948_I2C;
-  #else
-    // Stub class for compilation when library is missing
-    class ICM_20948_I2C {};
-  #endif
-#else
-  class ICM_20948_I2C {};  // Stub when IMU disabled
+  #include "../lib/SparkFun_9DoF_IMU_Breakout_-_ICM_20948_-_Arduino_Library/src/ICM_20948.h"
 #endif
 
 // ============================================================================
 // IMU DRIVER CLASS
 // ============================================================================
 
-/**
- * @brief ICM-20948 IMU driver wrapper
- *
- * Provides simplified interface to ICM-20948 library.
- * Handles initialization, configuration, and data reading.
- */
 class IMUDriver {
 public:
     IMUDriver();
 
     /**
-     * @brief Initialize IMU sensor
+     * @brief Initialize IMU sensor over I2C
      *
-     * Configures I2C communication and sensor settings.
-     * Sets default accelerometer and gyroscope ranges.
-     *
-     * @param i2cAddress I2C address (0x68 or 0x69, default 0x68)
-     * @return True if initialization successful
+     * @param ad0Val Address select: 0 = 0x68 (AD0 low), 1 = 0x69 (AD0 high)
+     * @return True if initialization succeeded
      */
-    bool init(uint8_t i2cAddress = 0x68);
+    bool init(uint8_t ad0Val = IMU_AD0_VAL);
 
     /**
      * @brief Check if IMU is connected and responding
-     *
-     * @return True if IMU is available
      */
-    bool isConnected();
+    bool isConnected() const { return initialized_; }
 
     /**
-     * @brief Read accelerometer and gyroscope data
-     *
-     * @param accel Output array for acceleration [x, y, z] in g (9.8 m/s²)
-     * @param gyro Output array for angular velocity [x, y, z] in deg/sec
-     * @return True if read successful
+     * @brief Check if new data is ready to be read from the sensor
      */
-    bool readAccelGyro(float accel[3], float gyro[3]);
+    bool dataReady();
 
     /**
-     * @brief Read magnetometer data
+     * @brief Read all sensor data from ICM-20948 (calls getAGMT internally)
      *
-     * @param mag Output array for magnetic field [x, y, z] in µT (microtesla)
-     * @return True if read successful
+     * Must call dataReady() first; call this when it returns true.
+     *
+     * @return True if read was successful
      */
-    bool readMagnetometer(float mag[3]);
+    bool update();
+
+    // ========================================================================
+    // SCALED OUTPUTS (post-library conversion, float)
+    // ========================================================================
+
+    /** Accelerometer X in mg (milligravity). 1000 mg = 1 g = 9.81 m/s². */
+    float getAccX() const { return accX_; }
+    float getAccY() const { return accY_; }
+    float getAccZ() const { return accZ_; }
+
+    /** Gyroscope in degrees per second (DPS). */
+    float getGyrX() const { return gyrX_; }
+    float getGyrY() const { return gyrY_; }
+    float getGyrZ() const { return gyrZ_; }
 
     /**
-     * @brief Read temperature from IMU
-     *
-     * @return Temperature in degrees Celsius
+     * Magnetometer in µT with calibration offset subtracted.
+     * Returns raw µT if no offset has been set (offsets default to 0.0).
      */
-    float readTemperature();
+    float getMagX() const { return magX_; }
+    float getMagY() const { return magY_; }
+    float getMagZ() const { return magZ_; }
+
+    /** Temperature from internal sensor in °C. */
+    float getTemp() const { return temp_; }
+
+    // ========================================================================
+    // PACKED INT16 OUTPUTS (for TLV transmission)
+    // ========================================================================
+
+    /** Accel as int16 in mg: direct cast of getAccX() */
+    int16_t getRawAccX() const { return (int16_t)accX_; }
+    int16_t getRawAccY() const { return (int16_t)accY_; }
+    int16_t getRawAccZ() const { return (int16_t)accZ_; }
+
+    /** Gyro as int16 in 0.1 DPS units: (int16)(gyrX * 10) */
+    int16_t getRawGyrX() const { return (int16_t)(gyrX_ * 10.0f); }
+    int16_t getRawGyrY() const { return (int16_t)(gyrY_ * 10.0f); }
+    int16_t getRawGyrZ() const { return (int16_t)(gyrZ_ * 10.0f); }
+
+    /** Mag as int16 in µT (calibration offset already applied) */
+    int16_t getRawMagX() const { return (int16_t)magX_; }
+    int16_t getRawMagY() const { return (int16_t)magY_; }
+    int16_t getRawMagZ() const { return (int16_t)magZ_; }
+
+    // ========================================================================
+    // MAGNETOMETER CALIBRATION
+    // ========================================================================
 
     /**
-     * @brief Set accelerometer range
+     * @brief Set hard-iron calibration offsets for the magnetometer
      *
-     * @param range Accelerometer range (2, 4, 8, or 16 for ±Xg)
+     * These offsets are subtracted from each magnetometer reading:
+     *   corrected = raw - offset
+     * Offset is typically (max + min) / 2 from a spinning calibration.
+     *
+     * @param ox, oy, oz Offsets in µT
      */
-    void setAccelRange(uint8_t range);
+    void setMagOffset(float ox, float oy, float oz);
 
     /**
-     * @brief Set gyroscope range
-     *
-     * @param range Gyroscope range (250, 500, 1000, or 2000 for ±X dps)
+     * @brief Get current magnetometer calibration offsets
      */
-    void setGyroRange(uint16_t range);
-
-    /**
-     * @brief Get current accelerometer range
-     *
-     * @return Accelerometer range in ±g
-     */
-    uint8_t getAccelRange() const { return accelRange_; }
-
-    /**
-     * @brief Get current gyroscope range
-     *
-     * @return Gyroscope range in ±dps
-     */
-    uint16_t getGyroRange() const { return gyroRange_; }
-
-    /**
-     * @brief Enable/disable magnetometer
-     *
-     * @param enable True to enable magnetometer
-     */
-    void setMagnetometerEnabled(bool enable);
-
-    /**
-     * @brief Check if magnetometer is enabled
-     *
-     * @return True if magnetometer is enabled
-     */
-    bool isMagnetometerEnabled() const { return magEnabled_; }
+    void getMagOffset(float& ox, float& oy, float& oz) const;
 
 private:
-    ICM_20948_I2C imu_;         // ICM-20948 library instance
-    bool initialized_;          // Initialization state
-    uint8_t i2cAddress_;        // I2C address (0x68 or 0x69)
-    uint8_t accelRange_;        // Accelerometer range (±g)
-    uint16_t gyroRange_;        // Gyroscope range (±dps)
-    bool magEnabled_;           // Magnetometer enabled flag
+#if IMU_ENABLED
+    ICM_20948_I2C imu_;         // SparkFun ICM-20948 library instance
+#endif
 
-    /**
-     * @brief Convert raw accelerometer data to g
-     *
-     * @param raw Raw sensor value
-     * @return Acceleration in g
-     */
-    float convertAccel(int16_t raw);
+    bool initialized_;
 
-    /**
-     * @brief Convert raw gyroscope data to deg/sec
-     *
-     * @param raw Raw sensor value
-     * @return Angular velocity in deg/sec
-     */
-    float convertGyro(int16_t raw);
+    // Latest sensor readings (updated by update())
+    float accX_, accY_, accZ_;  // mg
+    float gyrX_, gyrY_, gyrZ_;  // DPS
+    float magX_, magY_, magZ_;  // µT (offset applied)
+    float temp_;                // °C
 
-    /**
-     * @brief Convert raw magnetometer data to µT
-     *
-     * @param raw Raw sensor value
-     * @return Magnetic field in microtesla
-     */
-    float convertMag(int16_t raw);
+    // Hard-iron calibration offsets (default 0.0)
+    float magOffX_, magOffY_, magOffZ_;
 };
 
 #endif // IMUDRIVER_H

@@ -1,0 +1,27 @@
+#########################################################
+# Syntax Coloring Map for the Qwiic Ultrasonic Sensor   #
+#########################################################
+# Class
+#########################################################
+
+QwiicUltrasonic KEYWORD1
+
+#########################################################
+# Methods and Functions
+#########################################################
+
+begin KEYWORD2
+isConnected KEYWORD2
+triggerAndRead KEYWORD2
+changeAddress KEYWORD2
+
+#########################################################
+# Constants
+#########################################################
+
+QWIIC_ULTRASONIC_ADDRESSES LITERAL1
+QWIIC_ULTRASONIC_NUM_ADDRESSES LITERAL1
+QWIIC_ULTRASONIC_MIN_ADDRESS LITERAL1
+QWIIC_ULTRASONIC_MAX_ADDRESS LITERAL1
+QWIIC_ULTRASONIC_DEFAULT_ADDRESS LITERAL1
+QWIIC_ULTRASONIC_REGISTER_TRIGGER LITERAL1

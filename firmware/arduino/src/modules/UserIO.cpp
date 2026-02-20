@@ -1,6 +1,19 @@
 /**
  * @file UserIO.cpp
  * @brief Implementation of user I/O management
+ *
+ * IMPORTANT: Timer 3 Conflict (Rev. B Only)
+ * -----------------------------------------
+ * In Rev. B, PIN_LED_RED is moved to pin 5 (Timer 3, OC3A).
+ * Timer 3 is already configured in CTC mode for stepper pulse generation at 10kHz.
+ * A timer cannot operate in both CTC mode (steppers) and PWM mode (LED) simultaneously.
+ *
+ * Solution: Pin 5 is handled as digital-only (ON/OFF) in LED_PWM and LED_BREATHE modes.
+ * - LED_PWM: Uses threshold (brightness > 128) for ON/OFF instead of analogWrite()
+ * - LED_BREATHE: Falls back to blinking instead of smooth fading
+ *
+ * This does NOT affect Rev. A (PIN_LED_RED = pin 11, Timer 1) - PWM works normally.
+ * See: firmware/TIMER3_CONFLICT_ANALYSIS.md for complete technical details.
  */
 
 #include "UserIO.h"
@@ -238,7 +251,13 @@ void UserIO::updateLED(LEDState& led) {
 
         case LED_ON:
         case LED_PWM:
-            // Already handled in setLED()
+            // PIN_LED_RED cannot use PWM - Timer3 conflict with steppers
+            // Timer 3 is used for stepper pulse generation in CTC mode
+            if (led.pin == PIN_LED_RED) {
+                // Fallback: Use threshold for ON/OFF (no brightness control)
+                digitalWrite(led.pin, led.brightness > 128 ? HIGH : LOW);
+            }
+            // Otherwise already handled in setLED()
             break;
 
         case LED_BLINK:
@@ -251,31 +270,42 @@ void UserIO::updateLED(LEDState& led) {
             break;
 
         case LED_BREATHE: {
-            // Smooth breathing effect using sine wave approximation
-            uint32_t elapsed = now - led.lastToggle;
-            uint32_t phase = (elapsed * 255) / led.periodMs;
-
-            if (phase >= 255) {
-                led.lastToggle = now;
-                phase = 0;
-            }
-
-            // Simple triangle wave for breathing
-            uint8_t brightness;
-            if (phase < 128) {
-                brightness = phase * 2;  // Fade in
+            // PIN_LED_RED cannot breathe - Timer3 conflict with steppers
+            // Fallback: Blink instead of breathe for this pin
+            if (led.pin == PIN_LED_RED) {
+                // Use blink pattern as fallback
+                if (now - led.lastToggle >= led.periodMs / 2) {
+                    led.lastToggle = now;
+                    led.state = !led.state;
+                    digitalWrite(led.pin, led.state ? HIGH : LOW);
+                }
             } else {
-                brightness = (255 - phase) * 2;  // Fade out
-            }
+                // Smooth breathing effect using sine wave approximation
+                uint32_t elapsed = now - led.lastToggle;
+                uint32_t phase = (elapsed * 255) / led.periodMs;
 
-            // Apply brightness scaling
-            brightness = (brightness * led.brightness) / 255;
+                if (phase >= 255) {
+                    led.lastToggle = now;
+                    phase = 0;
+                }
 
-            // PIN_LED_PURPLE doesn't support PWM, so use ON/OFF only
-            if (led.pin == PIN_LED_PURPLE) {
-                digitalWrite(led.pin, (brightness > 128) ? HIGH : LOW);
-            } else {
-                analogWrite(led.pin, brightness);
+                // Simple triangle wave for breathing
+                uint8_t brightness;
+                if (phase < 128) {
+                    brightness = phase * 2;  // Fade in
+                } else {
+                    brightness = (255 - phase) * 2;  // Fade out
+                }
+
+                // Apply brightness scaling
+                brightness = (brightness * led.brightness) / 255;
+
+                // PIN_LED_PURPLE doesn't support PWM, so use ON/OFF only
+                if (led.pin == PIN_LED_PURPLE) {
+                    digitalWrite(led.pin, (brightness > 128) ? HIGH : LOW);
+                } else {
+                    analogWrite(led.pin, brightness);
+                }
             }
             break;
         }

@@ -1,31 +1,31 @@
 /**
  * @file SensorManager.h
- * @brief Sensor data aggregation and management
+ * @brief Centralized sensor management with multi-rate updates
  *
- * This module manages all sensor readings and provides a unified interface
- * for accessing sensor data. It handles:
- * - IMU (accelerometer, gyroscope, magnetometer)
- * - Battery and rail voltage monitoring (ADC)
- * - Temperature sensor (from IMU)
- * - Optional ultrasonic/ToF distance sensors
+ * SensorManager aggregates all sensor subsystems and exposes a unified interface
+ * for the rest of the firmware. It is called from the scheduler at two rates:
  *
- * The SensorManager is called periodically from the scheduler (50Hz) to
- * update all sensor readings. Other modules can query the latest data
- * without blocking on I2C or ADC operations.
+ *   update()          — called at SENSOR_UPDATE_FREQ_HZ (100 Hz): reads IMU,
+ *                       runs Fusion AHRS, samples voltages at 10 Hz sub-rate
+ *   updateRange()     — called at SENSOR_LIDAR_FREQ_HZ (50 Hz): reads lidar;
+ *                       ultrasonic sensors polled internally at 15 Hz sub-rate
  *
- * Voltage Dividers (from hardware design):
- * - Battery (VBAT): 1:6 divider (50kΩ/10kΩ) → 0-24V maps to 0-4V ADC
- * - 5V Rail (V5): 1:2 divider (10kΩ/10kΩ) → 0-10V maps to 0-5V ADC
- * - Servo Rail (VSERVO): 1:3 divider (20kΩ/10kΩ) → 0-15V maps to 0-5V ADC
+ * Attached sensors are controlled by config.h compile-time flags:
+ *   IMU_ENABLED, LIDAR_COUNT, ULTRASONIC_COUNT
  *
- * Usage:
- *   SensorManager::init();
+ * Magnetometer Calibration State Machine
+ * ----------------------------------------
+ * Calibration is only allowed in IDLE firmware state. The Bridge sends
+ * SENSOR_MAG_CAL_CMD; the result is streamed back via SENSOR_MAG_CAL_STATUS.
  *
- *   // In scheduler task @ 50Hz:
- *   SensorManager::update();
+ *   IDLE → startMagCalibration() → SAMPLING (collecting min/max per axis)
+ *        → saveMagCalibration()  → SAVED (offsets written to EEPROM, 9-DOF active)
+ *        → cancelMagCalibration()→ IDLE (no change)
  *
- *   // Query latest data:
- *   float vbat = SensorManager::getBatteryVoltage();
+ * Voltage Dividers (from PCB hardware design):
+ *   VBAT  (A0): 50kΩ/10kΩ → 1:6 → 0–24 V maps to 0–4 V ADC
+ *   V5    (A1): 10kΩ/10kΩ → 1:2 → 0–10 V maps to 0–5 V ADC
+ *   VSERVO(A2): 20kΩ/10kΩ → 1:3 → 0–15 V maps to 0–5 V ADC
  */
 
 #ifndef SENSORMANAGER_H
@@ -33,190 +33,242 @@
 
 #include <Arduino.h>
 #include <stdint.h>
-#include "../drivers/IMUDriver.h"
 #include "../config.h"
+#include "../drivers/IMUDriver.h"
+#include "../drivers/LidarDriver.h"
+#include "../drivers/UltrasonicDriver.h"
+#include "../lib/Fusion/FusionWrapper.h"
+#include "PersistentStorage.h"
+
+// Maximum number of range sensors of each type (must match config.h defines)
+#define SENSOR_MAX_LIDARS       4
+#define SENSOR_MAX_ULTRASONICS  4
 
 // ============================================================================
-// SENSOR MANAGER CLASS (Static)
+// MAGNETOMETER CALIBRATION STATE
 // ============================================================================
 
-/**
- * @brief Centralized sensor management
- *
- * Static class providing:
- * - Sensor initialization
- * - Periodic sensor updates
- * - Unified data access interface
- */
+enum MagCalState : uint8_t {
+    MAG_CAL_IDLE     = 0,   // No calibration in progress
+    MAG_CAL_SAMPLING = 1,   // Collecting samples (spinning the robot)
+    MAG_CAL_COMPLETE = 2,   // Sampling done, offsets computed, not yet saved
+    MAG_CAL_SAVED    = 3,   // Offsets saved to EEPROM and active
+    MAG_CAL_ERROR    = 4    // Error (e.g., insufficient samples)
+};
+
+struct MagCalData {
+    MagCalState state;
+    uint16_t    sampleCount;
+    float       minX, maxX;    // µT
+    float       minY, maxY;
+    float       minZ, maxZ;
+    float       offsetX, offsetY, offsetZ;  // (max+min)/2 per axis
+    bool        savedToEeprom;
+};
+
+// ============================================================================
+// SENSOR MANAGER (Static class)
+// ============================================================================
+
 class SensorManager {
 public:
     /**
      * @brief Initialize all enabled sensors
      *
-     * Initializes IMU, configures ADC, and prepares all sensor interfaces.
-     * Must be called once in setup() before using sensors.
+     * Initializes I2C, IMU, lidar(s), ultrasonic(s), and reads initial voltages.
+     * Loads magnetometer calibration from EEPROM if available.
+     * Call once in setup() before using any sensors.
      */
     static void init();
 
     /**
-     * @brief Update all sensor readings
+     * @brief Main sensor update — call at SENSOR_UPDATE_FREQ_HZ (100 Hz)
      *
-     * Called from scheduler at 50Hz.
-     * Reads all enabled sensors and updates internal buffers.
+     * - Reads IMU (if data ready) and runs Fusion AHRS
+     * - Updates voltage readings at 10 Hz sub-rate
+     * - Updates mag calibration sampling if active
      */
     static void update();
+
+    /**
+     * @brief Range sensor update — call at SENSOR_LIDAR_FREQ_HZ (50 Hz)
+     *
+     * - Reads all lidar sensors at 50 Hz
+     * - Reads ultrasonic sensors at 15 Hz sub-rate (every ~3rd call)
+     */
+    static void updateRange();
+
+    // ========================================================================
+    // IMU / FUSION OUTPUT
+    // ========================================================================
+
+    /**
+     * @brief Get the latest orientation quaternion from Fusion AHRS
+     *
+     * In 9-DOF mode (magnetometer calibrated): yaw is absolute (north-referenced).
+     * In 6-DOF fallback: yaw drifts slowly with gyro integration.
+     */
+    static void getQuaternion(float& w, float& x, float& y, float& z);
+
+    /**
+     * @brief Get linear acceleration in the earth (global/NWU) frame
+     *
+     * Gravity removed. A stationary sensor returns approximately (0, 0, 0).
+     * Units: g (1 g = 9.81 m/s²).
+     */
+    static void getEarthAcceleration(float& x, float& y, float& z);
+
+    /**
+     * @brief Check if the IMU is connected and producing data
+     */
+    static bool isIMUAvailable() { return imuInitialized_; }
+
+    /**
+     * @brief Check if the magnetometer calibration is active (9-DOF fusion)
+     */
+    static bool isMagCalibrated() { return magCal_.savedToEeprom || magCal_.state == MAG_CAL_COMPLETE; }
+
+    /**
+     * @brief Get latest raw IMU values (for TLV packing)
+     */
+    static int16_t getRawAccX();
+    static int16_t getRawAccY();
+    static int16_t getRawAccZ();
+    static int16_t getRawGyrX();
+    static int16_t getRawGyrY();
+    static int16_t getRawGyrZ();
+    static int16_t getRawMagX();
+    static int16_t getRawMagY();
+    static int16_t getRawMagZ();
+
+    // ========================================================================
+    // RANGE SENSORS
+    // ========================================================================
+
+    /**
+     * @brief Get number of active lidar sensors
+     */
+    static uint8_t getLidarCount() { return lidarCount_; }
+
+    /**
+     * @brief Get number of active ultrasonic sensors
+     */
+    static uint8_t getUltrasonicCount() { return ultrasonicCount_; }
+
+    /**
+     * @brief Get latest lidar distance reading
+     *
+     * @param idx Sensor index (0-based, up to getLidarCount()-1)
+     * @return Distance in mm, 0 = error / no reading yet
+     */
+    static uint16_t getLidarDistanceMm(uint8_t idx);
+
+    /**
+     * @brief Get latest ultrasonic distance reading
+     *
+     * @param idx Sensor index (0-based, up to getUltrasonicCount()-1)
+     * @return Distance in mm, 0 = error / no reading yet
+     */
+    static uint16_t getUltrasonicDistanceMm(uint8_t idx);
 
     // ========================================================================
     // VOLTAGE MONITORING
     // ========================================================================
 
-    /**
-     * @brief Get battery voltage
-     *
-     * @return Battery voltage in volts (0-24V range)
-     */
     static float getBatteryVoltage();
-
-    /**
-     * @brief Get 5V rail voltage
-     *
-     * @return 5V rail voltage in volts (nominal 5.0V)
-     */
     static float get5VRailVoltage();
-
-    /**
-     * @brief Get servo rail voltage
-     *
-     * @return Servo rail voltage in volts (typically 5-10V)
-     */
     static float getServoVoltage();
-
-    /**
-     * @brief Check if battery is low
-     *
-     * @param threshold Low battery threshold in volts (default: 10.5V for 12V NiMH)
-     * @return True if battery voltage is below threshold
-     */
-    static bool isBatteryLow(float threshold = 10.5f);
+    static bool  isBatteryLow(float threshold = VBAT_LOW_THRESHOLD);
 
     // ========================================================================
-    // IMU DATA
+    // MAGNETOMETER CALIBRATION API
     // ========================================================================
 
     /**
-     * @brief Get latest accelerometer data
+     * @brief Start magnetometer calibration sampling
      *
-     * @param accel Output array for acceleration [x, y, z] in g
-     * @return True if valid data available
+     * Resets min/max trackers and begins collecting samples.
+     * Only accepted when firmware is in IDLE state (enforced by caller).
      */
-    static bool getAcceleration(float accel[3]);
+    static void startMagCalibration();
 
     /**
-     * @brief Get latest gyroscope data
-     *
-     * @param gyro Output array for angular velocity [x, y, z] in deg/sec
-     * @return True if valid data available
+     * @brief Stop calibration sampling without saving
      */
-    static bool getAngularVelocity(float gyro[3]);
+    static void cancelMagCalibration();
 
     /**
-     * @brief Get latest magnetometer data
+     * @brief Save current computed calibration offsets to EEPROM and activate
      *
-     * @param mag Output array for magnetic field [x, y, z] in µT
-     * @return True if valid data available
+     * Requires MAG_CAL_MIN_SAMPLES samples. Returns false if insufficient.
+     *
+     * @return True if offsets were saved successfully
      */
-    static bool getMagneticField(float mag[3]);
+    static bool saveMagCalibration();
 
     /**
-     * @brief Get IMU temperature
+     * @brief Apply user-provided offsets directly and save to EEPROM
      *
-     * @return Temperature in degrees Celsius
+     * Skips the sampling phase; offsets provided by the Bridge
+     * (e.g., from a previous calibration run on the host side).
      */
-    static float getIMUTemperature();
+    static void applyMagCalibration(float ox, float oy, float oz);
 
     /**
-     * @brief Check if IMU is connected and responding
-     *
-     * @return True if IMU is available
+     * @brief Clear EEPROM calibration and revert to 6-DOF mode
      */
-    static bool isIMUAvailable();
+    static void clearMagCalibration();
+
+    /**
+     * @brief Read current calibration state (for SENSOR_MAG_CAL_STATUS TLV)
+     */
+    static const MagCalData& getMagCalData() { return magCal_; }
 
     // ========================================================================
     // STATISTICS
     // ========================================================================
 
-    /**
-     * @brief Get sensor update counter
-     *
-     * Increments each time update() is called.
-     * Useful for detecting sensor update frequency.
-     *
-     * @return Update counter
-     */
-    static uint32_t getUpdateCount();
-
-    /**
-     * @brief Get time of last sensor update
-     *
-     * @return Timestamp in milliseconds
-     */
-    static uint32_t getLastUpdateTime();
+    static uint32_t getUpdateCount()    { return updateCount_; }
+    static uint32_t getLastUpdateTime() { return lastUpdateTime_; }
 
 private:
-    // IMU driver
-    static IMUDriver imu_;
+    // ---- IMU + Fusion ----
+    static IMUDriver    imu_;
+    static FusionWrapper fusion_;
+    static bool imuInitialized_;
+    static uint32_t lastImuMicros_;     // micros() at last IMU update (for dt)
 
-    // Voltage readings (volts)
+    // ---- Range sensors ----
+    static LidarDriver      lidars_[SENSOR_MAX_LIDARS];
+    static UltrasonicDriver ultrasonics_[SENSOR_MAX_ULTRASONICS];
+    static uint8_t          lidarCount_;
+    static uint8_t          ultrasonicCount_;
+    static uint16_t         lidarDistMm_[SENSOR_MAX_LIDARS];
+    static uint16_t         ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS];
+
+    // Sub-rate counters
+    static uint8_t rangeCallCount_;     // increments each updateRange() call
+
+    // ---- Voltages ----
     static float batteryVoltage_;
     static float rail5VVoltage_;
     static float servoVoltage_;
+    static uint8_t voltageCallCount_;   // increments each update(); sample at 10 Hz
 
-    // IMU data buffers
-    static float accel_[3];         // Acceleration (g)
-    static float gyro_[3];          // Angular velocity (deg/sec)
-    static float mag_[3];           // Magnetic field (µT)
-    static float imuTemp_;          // Temperature (°C)
-    static bool imuDataValid_;      // IMU data validity flag
+    // ---- Magnetometer calibration ----
+    static MagCalData magCal_;
 
-    // Statistics
+    // ---- Statistics ----
+    static bool     initialized_;
     static uint32_t updateCount_;
     static uint32_t lastUpdateTime_;
 
-    // Initialization flags
-    static bool initialized_;
-    static bool imuInitialized_;
-
-    // ========================================================================
-    // INTERNAL HELPERS
-    // ========================================================================
-
-    /**
-     * @brief Read ADC voltage with averaging
-     *
-     * @param pin Analog input pin
-     * @param numSamples Number of samples to average (default: 4)
-     * @return Raw ADC value (0-1023)
-     */
-    static uint16_t readADCAverage(uint8_t pin, uint8_t numSamples = 4);
-
-    /**
-     * @brief Convert ADC reading to voltage
-     *
-     * @param adcValue Raw ADC value (0-1023)
-     * @param dividerRatio Voltage divider ratio (output / input)
-     * @return Actual voltage in volts
-     */
-    static float adcToVoltage(uint16_t adcValue, float dividerRatio);
-
-    /**
-     * @brief Update voltage readings
-     */
+    // ---- Internal helpers ----
+    static void initMagCalFromStorage();
     static void updateVoltages();
-
-    /**
-     * @brief Update IMU readings
-     */
-    static void updateIMU();
+    static void updateMagCalSampling();
+    static uint16_t readADCAverage(uint8_t pin, uint8_t numSamples = 4);
+    static float    adcToVoltage(uint16_t adcValue, float dividerRatio);
 };
 
 #endif // SENSORMANAGER_H

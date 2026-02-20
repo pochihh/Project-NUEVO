@@ -119,22 +119,18 @@ void setMotorPWM(uint8_t motorId, int16_t pwm) {
             pinIN2 = PIN_M2_IN2;
             dir = DC_MOTOR_2_DIR_INVERTED;
             break;
-#if DC_MOTOR_3_ENABLED
         case 2:
             pinEN = PIN_M3_EN;
             pinIN1 = PIN_M3_IN1;
             pinIN2 = PIN_M3_IN2;
             dir = DC_MOTOR_3_DIR_INVERTED;
             break;
-#endif
-#if DC_MOTOR_4_ENABLED
         case 3:
             pinEN = PIN_M4_EN;
             pinIN1 = PIN_M4_IN1;
             pinIN2 = PIN_M4_IN2;
             dir = DC_MOTOR_4_DIR_INVERTED;
             break;
-#endif
         default:
             return;  // Invalid motor ID
     }
@@ -187,27 +183,19 @@ void setup() {
     pinMode(PIN_M2_IN1, OUTPUT);
     pinMode(PIN_M2_IN2, OUTPUT);
 
-#if DC_MOTOR_3_ENABLED
     pinMode(PIN_M3_EN, OUTPUT);
     pinMode(PIN_M3_IN1, OUTPUT);
     pinMode(PIN_M3_IN2, OUTPUT);
-#endif
 
-#if DC_MOTOR_4_ENABLED
     pinMode(PIN_M4_EN, OUTPUT);
     pinMode(PIN_M4_IN1, OUTPUT);
     pinMode(PIN_M4_IN2, OUTPUT);
-#endif
 
     // Initialize all motors to stopped state
     setMotorPWM(0, 0);
     setMotorPWM(1, 0);
-#if DC_MOTOR_3_ENABLED
     setMotorPWM(2, 0);
-#endif
-#if DC_MOTOR_4_ENABLED
     setMotorPWM(3, 0);
-#endif
 
     DEBUG_SERIAL.println(F("[Setup] Motor control pins configured"));
 

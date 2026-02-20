@@ -1,18 +1,11 @@
 /**
  * @file IMUDriver.cpp
- * @brief Implementation of ICM-20948 IMU driver
+ * @brief Implementation of ICM-20948 IMU driver (SparkFun library, no DMP)
+ *
+ * See IMUDriver.h for usage and design notes.
  */
 
 #include "IMUDriver.h"
-
-#if IMU_ENABLED
-  // Only include ICM_20948 library if IMU is enabled
-  // Note: This requires the full ICM_20948 library with util/ subdirectory
-  // Comment out the include below if library is not available
-  // #include "../../lib/ICM_20948.h"
-#endif
-
-#include <Wire.h>
 
 // ============================================================================
 // CONSTRUCTOR
@@ -20,10 +13,11 @@
 
 IMUDriver::IMUDriver()
     : initialized_(false)
-    , i2cAddress_(0x68)
-    , accelRange_(16)
-    , gyroRange_(2000)
-    , magEnabled_(false)
+    , accX_(0.0f), accY_(0.0f), accZ_(0.0f)
+    , gyrX_(0.0f), gyrY_(0.0f), gyrZ_(0.0f)
+    , magX_(0.0f), magY_(0.0f), magZ_(0.0f)
+    , temp_(0.0f)
+    , magOffX_(0.0f), magOffY_(0.0f), magOffZ_(0.0f)
 {
 }
 
@@ -31,144 +25,96 @@ IMUDriver::IMUDriver()
 // INITIALIZATION
 // ============================================================================
 
-bool IMUDriver::init(uint8_t i2cAddress) {
-    i2cAddress_ = i2cAddress;
-
+bool IMUDriver::init(uint8_t ad0Val) {
 #if IMU_ENABLED
-    // Initialize I2C
-    Wire.begin();
+    // Wire.begin() is called once globally in main setup; do not call here.
+    // Set I2C clock to 400 kHz for fast sensor reads.
+    Wire.setClock(400000);
 
-    // Initialize ICM-20948
-    // Note: This requires full ICM_20948 library
-    // bool success = imu_.begin(Wire, i2cAddress);
-    bool success = false;  // Stub when library not available
+    // Try to initialize the ICM-20948. The library will retry on failure.
+    imu_.begin(Wire, ad0Val);
 
-    if (!success) {
-#ifdef DEBUG_IMU
-        DEBUG_SERIAL.println(F("[IMU] ICM-20948 library not available or init failed"));
+    if (imu_.status != ICM_20948_Stat_Ok) {
+#ifdef DEBUG_SENSOR
+        DEBUG_SERIAL.print(F("[IMU] Init failed: "));
+        DEBUG_SERIAL.println(imu_.statusString());
 #endif
         return false;
     }
 
-    // Set default accelerometer range (±16g)
-    setAccelRange(16);
-
-    // Set default gyroscope range (±2000 dps)
-    setGyroRange(2000);
-
-    // Enable magnetometer
-    setMagnetometerEnabled(true);
-
     initialized_ = true;
 
-#ifdef DEBUG_IMU
-    DEBUG_SERIAL.println(F("[IMU] ICM-20948 initialized"));
-    DEBUG_SERIAL.print(F("  - I2C Address: 0x"));
-    DEBUG_SERIAL.println(i2cAddress, HEX);
-    DEBUG_SERIAL.print(F("  - Accel Range: ±"));
-    DEBUG_SERIAL.print(accelRange_);
-    DEBUG_SERIAL.println(F("g"));
-    DEBUG_SERIAL.print(F("  - Gyro Range: ±"));
-    DEBUG_SERIAL.print(gyroRange_);
-    DEBUG_SERIAL.println(F("dps"));
+#ifdef DEBUG_SENSOR
+    DEBUG_SERIAL.print(F("[IMU] ICM-20948 initialized (AD0="));
+    DEBUG_SERIAL.print(ad0Val);
+    DEBUG_SERIAL.print(F(", addr=0x"));
+    DEBUG_SERIAL.print(ad0Val ? 0x69 : 0x68, HEX);
+    DEBUG_SERIAL.println(F(")"));
 #endif
 
     return true;
 #else
-    // IMU disabled in config
+    (void)ad0Val;
     return false;
 #endif
 }
 
-bool IMUDriver::isConnected() {
+// ============================================================================
+// DATA ACQUISITION
+// ============================================================================
+
+bool IMUDriver::dataReady() {
 #if IMU_ENABLED
     if (!initialized_) return false;
-    // IMU library not available
+    return imu_.dataReady();
+#else
     return false;
+#endif
+}
+
+bool IMUDriver::update() {
+#if IMU_ENABLED
+    if (!initialized_) return false;
+
+    // Read all axes in a single I2C transaction (accel + gyro + mag + temp)
+    imu_.getAGMT();
+
+    // Accelerometer: accX() returns mg (milligravity)
+    accX_ = imu_.accX();
+    accY_ = imu_.accY();
+    accZ_ = imu_.accZ();
+
+    // Gyroscope: gyrX() returns DPS (degrees per second)
+    gyrX_ = imu_.gyrX();
+    gyrY_ = imu_.gyrY();
+    gyrZ_ = imu_.gyrZ();
+
+    // Magnetometer: magX() returns µT; subtract hard-iron calibration offsets
+    magX_ = imu_.magX() - magOffX_;
+    magY_ = imu_.magY() - magOffY_;
+    magZ_ = imu_.magZ() - magOffZ_;
+
+    // Temperature: temp() returns °C
+    temp_ = imu_.temp();
+
+    return true;
 #else
     return false;
 #endif
 }
 
 // ============================================================================
-// DATA READING
+// MAGNETOMETER CALIBRATION
 // ============================================================================
 
-bool IMUDriver::readAccelGyro(float accel[3], float gyro[3]) {
-#if IMU_ENABLED
-    // IMU library not available - return zeros
-    accel[0] = accel[1] = accel[2] = 0.0f;
-    gyro[0] = gyro[1] = gyro[2] = 0.0f;
-    return false;
-#else
-    return false;
-#endif
+void IMUDriver::setMagOffset(float ox, float oy, float oz) {
+    magOffX_ = ox;
+    magOffY_ = oy;
+    magOffZ_ = oz;
 }
 
-bool IMUDriver::readMagnetometer(float mag[3]) {
-#if IMU_ENABLED
-    // IMU library not available - return zeros
-    mag[0] = mag[1] = mag[2] = 0.0f;
-    return false;
-#else
-    return false;
-#endif
-}
-
-float IMUDriver::readTemperature() {
-#if IMU_ENABLED
-    // IMU library not available
-    return 0.0f;
-#else
-    return 0.0f;
-#endif
-}
-
-// ============================================================================
-// CONFIGURATION
-// ============================================================================
-
-void IMUDriver::setAccelRange(uint8_t range) {
-#if IMU_ENABLED
-    accelRange_ = range;
-    // IMU library not available
-#endif
-}
-
-void IMUDriver::setGyroRange(uint16_t range) {
-#if IMU_ENABLED
-    gyroRange_ = range;
-    // IMU library not available
-#endif
-}
-
-void IMUDriver::setMagnetometerEnabled(bool enable) {
-#if IMU_ENABLED
-    magEnabled_ = enable;
-    // IMU library not available
-#endif
-}
-
-// ============================================================================
-// INTERNAL HELPERS
-// ============================================================================
-
-float IMUDriver::convertAccel(int16_t raw) {
-    // Convert raw value to g based on current range
-    // ICM-20948 uses 16-bit signed values
-    float scale = (float)accelRange_ / 32768.0f;
-    return raw * scale;
-}
-
-float IMUDriver::convertGyro(int16_t raw) {
-    // Convert raw value to deg/sec based on current range
-    // ICM-20948 uses 16-bit signed values
-    float scale = (float)gyroRange_ / 32768.0f;
-    return raw * scale;
-}
-
-float IMUDriver::convertMag(int16_t raw) {
-    // Convert raw value to µT (microtesla)
-    // AK09916 magnetometer: 0.15 µT/LSB
-    return raw * 0.15f;
+void IMUDriver::getMagOffset(float& ox, float& oy, float& oz) const {
+    ox = magOffX_;
+    oy = magOffY_;
+    oz = magOffZ_;
 }

@@ -85,8 +85,7 @@ void setup() {
     Serial.println(F("[Setup] Initializing stepper motors..."));
     StepperManager::init();
 
-    // Configure stepper 0 (always enabled in config)
-#if STEPPER_1_ENABLED
+    // Configure stepper 0
     StepperMotor* stepper0 = StepperManager::getStepper(0);
     if (stepper0) {
         stepper0->setPins(PIN_ST1_STEP, PIN_ST1_DIR, PIN_ST1_EN);
@@ -94,14 +93,12 @@ void setup() {
         stepper0->setLimitPin(PIN_ST1_LIMIT, LIMIT_ACTIVE_LOW ? LOW : HIGH);
         Serial.println(F("  - Stepper 0: Limit switch configured"));
 #endif
-        stepper0->setMaxVelocity(1000);     // 1000 steps/sec default
-        stepper0->setAcceleration(500);     // 500 steps/sec² default
+        stepper0->setMaxVelocity(1000);
+        stepper0->setAcceleration(500);
         Serial.println(F("  - Stepper 0: Initialized"));
     }
-#endif
 
-    // Configure stepper 1 (if enabled)
-#if STEPPER_2_ENABLED
+    // Configure stepper 1
     StepperMotor* stepper1 = StepperManager::getStepper(1);
     if (stepper1) {
         stepper1->setPins(PIN_ST2_STEP, PIN_ST2_DIR, PIN_ST2_EN);
@@ -113,10 +110,8 @@ void setup() {
         stepper1->setAcceleration(500);
         Serial.println(F("  - Stepper 1: Initialized"));
     }
-#endif
 
-    // Configure stepper 2 (if enabled)
-#if STEPPER_3_ENABLED
+    // Configure stepper 2
     StepperMotor* stepper2 = StepperManager::getStepper(2);
     if (stepper2) {
         stepper2->setPins(PIN_ST3_STEP, PIN_ST3_DIR, PIN_ST3_EN);
@@ -128,10 +123,8 @@ void setup() {
         stepper2->setAcceleration(500);
         Serial.println(F("  - Stepper 2: Initialized"));
     }
-#endif
 
-    // Configure stepper 3 (if enabled)
-#if STEPPER_4_ENABLED
+    // Configure stepper 3
     StepperMotor* stepper3 = StepperManager::getStepper(3);
     if (stepper3) {
         stepper3->setPins(PIN_ST4_STEP, PIN_ST4_DIR, PIN_ST4_EN);

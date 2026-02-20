@@ -150,6 +150,14 @@ public:
     void setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2);
 
     /**
+     * @brief Configure current sense pin and scaling
+     *
+     * @param pinCT Analog pin for current sensing (e.g., A3)
+     * @param maPerVolt Current sensor scaling factor (mA per volt)
+     */
+    void setCurrentPin(uint8_t pinCT, float maPerVolt);
+
+    /**
      * @brief Enable motor in specified control mode
      *
      * @param mode Control mode (POSITION or VELOCITY)
@@ -269,6 +277,13 @@ public:
     int16_t getPWMOutput() const { return pwmOutput_; }
 
     /**
+     * @brief Get motor current
+     *
+     * @return Current in milliamps, -1 if current sensing not configured
+     */
+    int16_t getCurrent() const { return currentMa_; }
+
+    /**
      * @brief Get motor ID
      *
      * @return Motor identifier (0-3)
@@ -281,13 +296,17 @@ private:
     uint8_t pinEN_;                         // PWM pin (speed)
     uint8_t pinIN1_;                        // Direction pin 1
     uint8_t pinIN2_;                        // Direction pin 2
+    uint8_t pinCT_;                         // Current sense pin (analog)
     bool invertDir_;                        // Direction inversion flag
+    bool hasCurrentSense_;                  // True if current sensing is configured
 
     // Control state
     DCMotorMode mode_;                      // Current control mode
     int32_t targetPosition_;                // Target position (ticks)
     float targetVelocity_;                  // Target velocity (ticks/sec)
     int16_t pwmOutput_;                     // Current PWM output (-255 to +255)
+    int16_t currentMa_;                     // Motor current in milliamps (-1 if not available)
+    float maPerVolt_;                       // Current sensor scaling (mA/V)
 
     // PID controllers
     PIDController positionPID_;             // Position loop (outer)

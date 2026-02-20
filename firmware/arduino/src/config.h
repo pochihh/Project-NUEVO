@@ -13,7 +13,7 @@
 // FIRMWARE VERSION
 // ============================================================================
 
-#define FIRMWARE_VERSION        0x00060000  // Version 0.6.0 (Phase 6)
+#define FIRMWARE_VERSION        0x00070000  // Version 0.7.0 (Phase 7 - sensor refactor)
 
 // ============================================================================
 // HARDWARE CONFIGURATION
@@ -22,10 +22,8 @@
 // DC Motors
 #define NUM_DC_MOTORS           4       // Total DC motor channels
 
-#define DC_MOTOR_1_ENABLED      1       // Default wheel motor (left/right)
-#define DC_MOTOR_2_ENABLED      1       // Default wheel motor (left/right)
-#define DC_MOTOR_3_ENABLED      1       // Manipulator motor (optional)
-#define DC_MOTOR_4_ENABLED      1       // Manipulator motor (optional)
+// All DC motor channels are always initialized. Use DC_ENABLE TLV command at
+// runtime to activate specific motors. Set NUM_DC_MOTORS to reduce channel count.
 
 // DC Motor direction inversion (H-bridge wiring correction)
 // Set to 1 to invert motor direction (swaps forward/reverse)
@@ -37,10 +35,8 @@
 // Stepper Motors
 #define NUM_STEPPERS            4       // Total stepper channels
 
-#define STEPPER_1_ENABLED       1
-#define STEPPER_2_ENABLED       1
-#define STEPPER_3_ENABLED       1
-#define STEPPER_4_ENABLED       1
+// All stepper channels are always initialized. Use STEP_ENABLE TLV command at
+// runtime to activate specific steppers. Set NUM_STEPPERS to reduce channel count.
 
 // Servos (via PCA9685)
 #define NUM_SERVO_CHANNELS      16      // PCA9685 provides 16 channels
@@ -81,7 +77,10 @@
 // Task update frequencies
 #define DC_PID_FREQ_HZ          200     // DC motor PID loop (5ms period)
 #define UART_COMMS_FREQ_HZ      100     // UART communication (10ms period)
-#define SENSOR_UPDATE_FREQ_HZ   50      // Sensor reading (20ms period)
+#define SENSOR_UPDATE_FREQ_HZ   100     // IMU sensor reading (10ms period)
+#define SENSOR_LIDAR_FREQ_HZ    50      // Lidar reading (20ms period)
+#define SENSOR_ULTRASONIC_FREQ_HZ 15   // Ultrasonic reading (67ms period)
+#define SENSOR_VOLTAGE_FREQ_HZ  10      // Voltage monitoring (100ms period)
 #define USER_IO_FREQ_HZ         20      // LED/button update (50ms period)
 
 // Stepper pulse generation (Timer3)
@@ -96,7 +95,7 @@
 // ============================================================================
 
 // UART to Raspberry Pi (Serial2)
-#define RPI_BAUD_RATE           500000  // High-speed UART
+#define RPI_BAUD_RATE           1000000 // 1 Mbps UART (full duplex, ~48% TX utilization at 100Hz)
 #define RPI_SERIAL              Serial2 // Hardware serial port
 
 // Debug serial (Serial0 - USB)
@@ -143,13 +142,47 @@
 // SENSOR CONFIGURATION
 // ============================================================================
 
-// IMU (ICM-20948)
-#define IMU_ENABLED             0
-#define IMU_I2C_ADDR            0x68    // Default I2C address (AD0=LOW)
+// IMU (ICM-20948 via SparkFun library + Fusion AHRS)
+#define IMU_ENABLED             1
+// AD0_VAL: 0 = I2C addr 0x68 (AD0 pin LOW), 1 = I2C addr 0x69 (AD0 pin HIGH)
+#define IMU_AD0_VAL             1       // SparkFun breakout default: AD0 high = 0x69
 
-// Ultrasonic rangefinder
-#define ULTRASONIC_ENABLED      0
-#define ULTRASONIC_I2C_ADDR     0x30    // Example I2C address
+// Fusion AHRS settings (Madgwick-based sensor fusion)
+// gain: 0.5 default. Higher = faster convergence, more susceptible to disturbance.
+#define FUSION_GAIN             0.5f
+// Rejection thresholds: measurements outside these bounds are rejected during init
+#define FUSION_ACCEL_REJECTION  10.0f   // g (acceleration rejection threshold)
+#define FUSION_MAG_REJECTION    10.0f   // µT (magnetic rejection threshold)
+// Recovery trigger period: seconds before algorithm exits recovery mode
+#define FUSION_RECOVERY_PERIOD  5       // seconds
+
+// Lidar (Garmin LIDAR-Lite v4, via I2C)
+#define LIDAR_COUNT             0       // Number of attached lidar sensors (0 to disable)
+// Up to 4 lidar sensors at different I2C addresses (change with address jumper)
+#define LIDAR_0_I2C_ADDR        0x62    // Default LIDAR-Lite v4 address
+#define LIDAR_1_I2C_ADDR        0x63
+#define LIDAR_2_I2C_ADDR        0x64
+#define LIDAR_3_I2C_ADDR        0x65
+
+// Ultrasonic (SparkFun Qwiic HC-SR04, via I2C)
+#define ULTRASONIC_COUNT        0       // Number of attached ultrasonic sensors (0 to disable)
+// Up to 4 ultrasonic sensors at different I2C addresses (configurable via Example 2)
+#define ULTRASONIC_0_I2C_ADDR   0x2F    // Default Qwiic Ultrasonic address
+#define ULTRASONIC_1_I2C_ADDR   0x2E
+#define ULTRASONIC_2_I2C_ADDR   0x2D
+#define ULTRASONIC_3_I2C_ADDR   0x2C
+
+// ============================================================================
+// MAGNETOMETER CALIBRATION
+// ============================================================================
+
+// Minimum samples required before calibration can be saved.
+// The robot must be rotated through all orientations during this time.
+// At 100 Hz IMU rate, 50 samples = 0.5 s minimum; collect for 10-20 s in practice.
+#define MAG_CAL_MIN_SAMPLES     50
+
+// EEPROM layout and addressing are managed by PersistentStorage.
+// See firmware/arduino/src/modules/PersistentStorage.h for layout details.
 
 // Voltage monitoring
 #define VBAT_ENABLED            1       // Battery voltage monitoring
@@ -182,6 +215,16 @@
 #define VBAT_LOW_THRESHOLD      10.5f   // Warn below this voltage
 
 // ============================================================================
+// DC MOTOR CURRENT SENSING
+// ============================================================================
+
+// Current sensor configuration
+// Hardware: CT Output voltage (V) = Current (A) × 0.155
+// Scaling: 0.155 V/A = 155 mV/A = 0.155 mV/mA
+// Conversion: Current (mA) = Voltage (V) × (1000 / 0.155) = Voltage × 6451.6
+#define CURRENT_SENSE_MA_PER_VOLT   6451.6f  // milliamps per volt (1/0.155 × 1000)
+
+// ============================================================================
 // NEOPIXEL CONFIGURATION
 // ============================================================================
 
@@ -198,12 +241,15 @@
 // LIMIT SWITCH CONFIGURATION
 // ============================================================================
 
-// Assign limit switches to stepper motors (0 = unused)
-// Each stepper can have one limit switch for homing
-#define STEPPER_1_LIMIT_PIN     40      // LIM1 / BTN3
-#define STEPPER_2_LIMIT_PIN     41      // LIM2 / BTN4
-#define STEPPER_3_LIMIT_PIN     48      // LIM3 / BTN5
-#define STEPPER_4_LIMIT_PIN     49      // LIM4 / BTN6
+// Stepper limit switch assignments (maps to limit switch pins)
+// Uncomment and update these definitions if limit switches are connected for homing.
+// If no limit switches are used, leave these undefined
+// Homing is disabled if no limit switch pins are defined.
+
+// #define PIN_ST1_LIMIT           PIN_LIM1  // Stepper 1 limit (40)
+// #define PIN_ST2_LIMIT           PIN_LIM2  // Stepper 2 limit (41)
+// #define PIN_ST3_LIMIT           PIN_LIM3  // Stepper 3 limit (48)
+// #define PIN_ST4_LIMIT           PIN_LIM4  // Stepper 4 limit (49)
 
 // Limit switch active state
 #define LIMIT_ACTIVE_LOW        1       // 1 = active low, 0 = active high

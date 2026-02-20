@@ -113,22 +113,10 @@ void taskDCMotorPID() {
   digitalWrite(DEBUG_PIN_PID_LOOP, HIGH);
 #endif
 
-  // Update all enabled DC motor PID controllers
-#if DC_MOTOR_1_ENABLED
-  dcMotors[0].update();
-#endif
-
-#if DC_MOTOR_2_ENABLED
-  dcMotors[1].update();
-#endif
-
-#if DC_MOTOR_3_ENABLED
-  dcMotors[2].update();
-#endif
-
-#if DC_MOTOR_4_ENABLED
-  dcMotors[3].update();
-#endif
+  // Update all DC motor PID controllers
+  for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
+    dcMotors[i].update();
+  }
 
 #ifdef DEBUG_PINS_ENABLED
   digitalWrite(DEBUG_PIN_PID_LOOP, LOW);
@@ -152,18 +140,9 @@ void taskUARTComms() {
   // Safety timeout check - disable all motors if heartbeat lost
   if (!MessageCenter::isHeartbeatValid()) {
     // Disable DC motors
-#if DC_MOTOR_1_ENABLED
-    dcMotors[0].disable();
-#endif
-#if DC_MOTOR_2_ENABLED
-    dcMotors[1].disable();
-#endif
-#if DC_MOTOR_3_ENABLED
-    dcMotors[2].disable();
-#endif
-#if DC_MOTOR_4_ENABLED
-    dcMotors[3].disable();
-#endif
+    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
+      dcMotors[i].disable();
+    }
 
     // Disable stepper motors
     StepperManager::disableAll();
@@ -333,85 +312,65 @@ void setup() {
   DEBUG_SERIAL.println(F(" counts/rev"));
 
   // Motor 1
-#if DC_MOTOR_1_ENABLED
   encoder1.init(PIN_M1_ENC_A, PIN_M1_ENC_B, ENCODER_1_DIR_INVERTED);
   velocityEst1.init(countsPerRev);
   velocityEst1.setFilterSize(VELOCITY_FILTER_SIZE);
   velocityEst1.setZeroTimeout(VELOCITY_ZERO_TIMEOUT);
-
   dcMotors[0].init(0, &encoder1, &velocityEst1, DC_MOTOR_1_DIR_INVERTED);
   dcMotors[0].setPins(PIN_M1_EN, PIN_M1_IN1, PIN_M1_IN2);
   dcMotors[0].setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
   dcMotors[0].setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
   DEBUG_SERIAL.println(F("  - Motor 1 initialized"));
-#endif
 
   // Motor 2
-#if DC_MOTOR_2_ENABLED
   encoder2.init(PIN_M2_ENC_A, PIN_M2_ENC_B, ENCODER_2_DIR_INVERTED);
   velocityEst2.init(countsPerRev);
   velocityEst2.setFilterSize(VELOCITY_FILTER_SIZE);
   velocityEst2.setZeroTimeout(VELOCITY_ZERO_TIMEOUT);
-
   dcMotors[1].init(1, &encoder2, &velocityEst2, DC_MOTOR_2_DIR_INVERTED);
   dcMotors[1].setPins(PIN_M2_EN, PIN_M2_IN1, PIN_M2_IN2);
   dcMotors[1].setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
   dcMotors[1].setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
   DEBUG_SERIAL.println(F("  - Motor 2 initialized"));
-#endif
 
   // Motor 3
-#if DC_MOTOR_3_ENABLED
   encoder3.init(PIN_M3_ENC_A, PIN_M3_ENC_B, ENCODER_3_DIR_INVERTED);
   velocityEst3.init(countsPerRev);
   velocityEst3.setFilterSize(VELOCITY_FILTER_SIZE);
   velocityEst3.setZeroTimeout(VELOCITY_ZERO_TIMEOUT);
-
   dcMotors[2].init(2, &encoder3, &velocityEst3, DC_MOTOR_3_DIR_INVERTED);
   dcMotors[2].setPins(PIN_M3_EN, PIN_M3_IN1, PIN_M3_IN2);
   dcMotors[2].setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
   dcMotors[2].setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
   DEBUG_SERIAL.println(F("  - Motor 3 initialized"));
-#endif
 
   // Motor 4
-#if DC_MOTOR_4_ENABLED
   encoder4.init(PIN_M4_ENC_A, PIN_M4_ENC_B, ENCODER_4_DIR_INVERTED);
   velocityEst4.init(countsPerRev);
   velocityEst4.setFilterSize(VELOCITY_FILTER_SIZE);
   velocityEst4.setZeroTimeout(VELOCITY_ZERO_TIMEOUT);
-
   dcMotors[3].init(3, &encoder4, &velocityEst4, DC_MOTOR_4_DIR_INVERTED);
   dcMotors[3].setPins(PIN_M4_EN, PIN_M4_IN1, PIN_M4_IN2);
   dcMotors[3].setPositionPID(DEFAULT_POS_KP, DEFAULT_POS_KI, DEFAULT_POS_KD);
   dcMotors[3].setVelocityPID(DEFAULT_VEL_KP, DEFAULT_VEL_KI, DEFAULT_VEL_KD);
   DEBUG_SERIAL.println(F("  - Motor 4 initialized"));
-#endif
 
   // ------------------------------------------------------------------------
   // Attach Encoder Interrupts
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println(F("[Setup] Attaching encoder interrupts..."));
 
-#if DC_MOTOR_1_ENABLED
   attachInterrupt(digitalPinToInterrupt(PIN_M1_ENC_A), encoderISR_M1, CHANGE);
   DEBUG_SERIAL.println(F("  - Motor 1 encoder ISR attached"));
-#endif
 
-#if DC_MOTOR_2_ENABLED
   attachInterrupt(digitalPinToInterrupt(PIN_M2_ENC_A), encoderISR_M2, CHANGE);
   DEBUG_SERIAL.println(F("  - Motor 2 encoder ISR attached"));
-#endif
 
-#if DC_MOTOR_3_ENABLED
   attachInterrupt(digitalPinToInterrupt(PIN_M3_ENC_A), encoderISR_M3, CHANGE);
   DEBUG_SERIAL.println(F("  - Motor 3 encoder ISR attached"));
-#endif
 
-#if DC_MOTOR_4_ENABLED
   attachInterrupt(digitalPinToInterrupt(PIN_M4_ENC_A), encoderISR_M4, CHANGE);
   DEBUG_SERIAL.println(F("  - Motor 4 encoder ISR attached"));
-#endif
 
   // ------------------------------------------------------------------------
   // Register Scheduler Tasks

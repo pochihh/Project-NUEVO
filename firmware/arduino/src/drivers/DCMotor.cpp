@@ -81,11 +81,15 @@ DCMotor::DCMotor()
     , pinEN_(0)
     , pinIN1_(0)
     , pinIN2_(0)
+    , pinCT_(0)
     , invertDir_(false)
+    , hasCurrentSense_(false)
     , mode_(DC_MODE_DISABLED)
     , targetPosition_(0)
     , targetVelocity_(0.0f)
     , pwmOutput_(0)
+    , currentMa_(-1)
+    , maPerVolt_(1000.0f)
     , encoder_(nullptr)
     , velocityEst_(nullptr)
     , lastUpdateUs_(0)
@@ -114,6 +118,15 @@ void DCMotor::setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2) {
     analogWrite(pinEN_, 0);
     digitalWrite(pinIN1_, LOW);
     digitalWrite(pinIN2_, LOW);
+}
+
+void DCMotor::setCurrentPin(uint8_t pinCT, float maPerVolt) {
+    pinCT_ = pinCT;
+    maPerVolt_ = maPerVolt;
+    hasCurrentSense_ = true;
+
+    // Configure as analog input (no pinMode needed for analog pins)
+    currentMa_ = -1;  // Will be updated in update()
 }
 
 void DCMotor::enable(DCMotorMode mode) {
@@ -198,6 +211,35 @@ void DCMotor::update() {
     velocityEst_->update(lastEdgeUs, currentPosition);
 
     float currentVelocity = velocityEst_->getVelocity();
+
+    // Read motor current if current sensing is configured
+    if (hasCurrentSense_) {
+        // Multiple ADC reads and average to reduce noise
+        const uint8_t NUM_SAMPLES = 4;
+        uint32_t adcSum = 0;
+
+        for (uint8_t i = 0; i < NUM_SAMPLES; i++) {
+            adcSum += analogRead(pinCT_);
+        }
+
+        int rawADC = adcSum / NUM_SAMPLES;
+
+        // Convert to voltage (assuming 5V reference)
+        float voltage = (rawADC / 1023.0f) * 5.0f;
+
+        // Convert to milliamps using scaling factor
+        int16_t newCurrentMa = (int16_t)(voltage * maPerVolt_);
+
+        // Apply deadband: ignore small currents when motor is stopped
+        if (pwmOutput_ == 0 && abs(newCurrentMa) < 50) {
+            newCurrentMa = 0;
+        }
+
+        // Simple low-pass filter (exponential moving average)
+        // Alpha = 0.3 means 30% new value, 70% old value
+        const float ALPHA = 0.3f;
+        currentMa_ = (int16_t)((ALPHA * newCurrentMa) + ((1.0f - ALPHA) * currentMa_));
+    }
 
     // Compute control output based on mode
     float velocitySetpoint = targetVelocity_;

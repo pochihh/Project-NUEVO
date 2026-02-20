@@ -109,13 +109,8 @@ void setup() {
     encoder1.init(PIN_M1_ENC_A, PIN_M1_ENC_B, ENCODER_1_DIR_INVERTED);
     encoder2.init(PIN_M2_ENC_A, PIN_M2_ENC_B, ENCODER_2_DIR_INVERTED);
 
-#if DC_MOTOR_3_ENABLED
     encoder3.init(PIN_M3_ENC_A, PIN_M3_ENC_B, ENCODER_3_DIR_INVERTED);
-#endif
-
-#if DC_MOTOR_4_ENABLED
     encoder4.init(PIN_M4_ENC_A, PIN_M4_ENC_B, ENCODER_4_DIR_INVERTED);
-#endif
 
     DEBUG_SERIAL.println(F("[Setup] Encoders initialized"));
 
@@ -123,13 +118,8 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(PIN_M1_ENC_A), encoderISR_M1, CHANGE);
     attachInterrupt(digitalPinToInterrupt(PIN_M2_ENC_A), encoderISR_M2, CHANGE);
 
-#if DC_MOTOR_3_ENABLED
     attachInterrupt(digitalPinToInterrupt(PIN_M3_ENC_A), encoderISR_M3, CHANGE);
-#endif
-
-#if DC_MOTOR_4_ENABLED
     attachInterrupt(digitalPinToInterrupt(PIN_M4_ENC_A), encoderISR_M4, CHANGE);
-#endif
 
     DEBUG_SERIAL.println(F("[Setup] Encoder interrupts attached"));
 
@@ -146,21 +136,17 @@ void setup() {
     DEBUG_SERIAL.print(encoder2.getResolutionMultiplier() * ENCODER_PPR);
     DEBUG_SERIAL.println(F(" counts/rev)"));
 
-#if DC_MOTOR_3_ENABLED
     DEBUG_SERIAL.print(F("  - Motor 3: "));
     DEBUG_SERIAL.print(ENCODER_3_MODE);
     DEBUG_SERIAL.print(F("x mode ("));
     DEBUG_SERIAL.print(encoder3.getResolutionMultiplier() * ENCODER_PPR);
     DEBUG_SERIAL.println(F(" counts/rev)"));
-#endif
 
-#if DC_MOTOR_4_ENABLED
     DEBUG_SERIAL.print(F("  - Motor 4: "));
     DEBUG_SERIAL.print(ENCODER_4_MODE);
     DEBUG_SERIAL.print(F("x mode ("));
     DEBUG_SERIAL.print(encoder4.getResolutionMultiplier() * ENCODER_PPR);
     DEBUG_SERIAL.println(F(" counts/rev)"));
-#endif
 
     DEBUG_SERIAL.println();
     DEBUG_SERIAL.println(F("Test Instructions:"));
@@ -195,7 +181,6 @@ void loop() {
     DEBUG_SERIAL.print(time2);
     DEBUG_SERIAL.print(F("µs]"));
 
-#if DC_MOTOR_3_ENABLED
     int32_t count3 = encoder3.getCount();
     uint32_t time3 = encoder3.getLastEdgeUs();
     DEBUG_SERIAL.print(F("  |  M3: "));
@@ -203,9 +188,7 @@ void loop() {
     DEBUG_SERIAL.print(F(" ["));
     DEBUG_SERIAL.print(time3);
     DEBUG_SERIAL.print(F("µs]"));
-#endif
 
-#if DC_MOTOR_4_ENABLED
     int32_t count4 = encoder4.getCount();
     uint32_t time4 = encoder4.getLastEdgeUs();
     DEBUG_SERIAL.print(F("  |  M4: "));
@@ -213,7 +196,6 @@ void loop() {
     DEBUG_SERIAL.print(F(" ["));
     DEBUG_SERIAL.print(time4);
     DEBUG_SERIAL.print(F("µs]"));
-#endif
 
     DEBUG_SERIAL.println();
 

@@ -1,0 +1,65 @@
+#######################################
+# Syntax Coloring Map
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+isConnected	KEYWORD2
+configure	KEYWORD2
+setI2Caddr	KEYWORD2
+useDefaultAddress	KEYWORD2
+useNewAddressOnly	KEYWORD2
+useBothAddresses	KEYWORD2
+enableFlash	KEYWORD2
+takeRange	KEYWORD2
+waitForBusy	KEYWORD2
+getBusyFlag	KEYWORD2
+readDistance	KEYWORD2
+getDistance	KEYWORD2
+takeRangeGpio	KEYWORD2
+waitForBusyGpio	KEYWORD2
+getBusyFlagGpio	KEYWORD2
+write	KEYWORD2
+read	KEYWORD2
+correlationRecordRead	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+LIDARLite_v4LED_h	LITERAL1
+LIDARLITE_ADDR_DEFAULT	LITERAL1
+ACQ_COMMANDS	LITERAL1
+STATUS	LITERAL1
+ACQUISITION_COUNT	LITERAL1
+FULL_DELAY_LOW	LITERAL1
+FULL_DELAY_HIGH	LITERAL1
+UNIT_ID_0	LITERAL1
+UNIT_ID_1	LITERAL1
+UNIT_ID_2	LITERAL1
+UNIT_ID_3	LITERAL1
+I2C_SEC_ADDR	LITERAL1
+I2C_CONFIG	LITERAL1
+DETECTION_SENSITIVITY	LITERAL1
+LIB_VERSION	LITERAL1
+CORR_DATA	LITERAL1
+CP_VER_LO	LITERAL1
+BOARD_TEMPERATURE	LITERAL1
+HARDWARE_VERSION	LITERAL1
+POWER_MODE	LITERAL1
+MEASUREMENT_INTERVAL	LITERAL1
+FACTORY_RESET	LITERAL1
+QUICK_TERMINATION	LITERAL1
+START_BOOTLOADER	LITERAL1
+ENABLE_FLASH_STORAGE	LITERAL1
+HIGH_ACCURACY_MODE	LITERAL1
+SOC_TEMPERATURE	LITERAL1

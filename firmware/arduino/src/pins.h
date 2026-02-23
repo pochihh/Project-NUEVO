@@ -186,6 +186,42 @@
 #define PIN_ANALOG_EXP_9        A15     // Analog expansion 9
 
 // ============================================================================
+// TIMER OCR REGISTER ASSIGNMENTS — Rev A
+// ============================================================================
+//
+// These macros map motor EN and LED pins to their controlling timer compare
+// and ICR registers. Drivers write OCRnx directly instead of calling
+// analogWrite() to avoid corrupting the ISR timer configuration.
+//
+// The "IS_OCnx" flags tell ISRScheduler::init() which output compare channels
+// to connect (set COMnx bits) when configuring the timers in Fast PWM mode.
+//
+// Rev A assignments:
+//   M1_EN  (pin 5)  — Timer3 OC3A  (10 kHz carrier, from StepperManager)
+//   M2_EN  (pin 6)  — Timer4 OC4A  (10 kHz carrier, from ISRScheduler)
+//   LED_RED(pin 11) — Timer1 OC1A  (200 Hz carrier, from ISRScheduler)
+//
+// Rev B would replace these with:
+//   LED_RED(pin 5)  — Timer3 OC3A  (LED_RED_IS_OC3A, LED_RED_OCR=OCR3A)
+//   M1_EN  (pin 6)  — Timer4 OC4A  (PIN_M1_EN_IS_OC4A, PIN_M1_EN_OCR=OCR4A)
+//   M2_EN  (pin 7)  — Timer4 OC4B  (PIN_M2_EN_IS_OC4B, PIN_M2_EN_OCR=OCR4B)
+//
+// Motor 1 EN (pin 5) — Timer3 OC3A
+#define PIN_M1_EN_IS_OC3A               // Timer3 OC3A connected to pin 5 (M1_EN)
+#define PIN_M1_EN_OCR    OCR3A          // Write motor speed here instead of analogWrite()
+#define PIN_M1_EN_ICR    ICR3           // Timer TOP for scaling: duty = (speed * ICR3) / 255
+
+// Motor 2 EN (pin 6) — Timer4 OC4A
+#define PIN_M2_EN_IS_OC4A               // Timer4 OC4A connected to pin 6 (M2_EN)
+#define PIN_M2_EN_OCR    OCR4A          // Write motor speed here instead of analogWrite()
+#define PIN_M2_EN_ICR    ICR4           // Timer TOP for scaling: duty = (speed * ICR4) / 255
+
+// LED Red (pin 11) — Timer1 OC1A
+#define PIN_LED_RED_IS_OC1A             // Timer1 OC1A connected to pin 11 (LED_RED)
+#define LED_RED_OCR      OCR1A          // Write brightness here instead of analogWrite()
+#define LED_RED_ICR      ICR1           // Timer TOP for scaling: duty = (bri * ICR1) / 255
+
+// ============================================================================
 // CONVENIENCE ARRAYS FOR ITERATION
 // ============================================================================
 

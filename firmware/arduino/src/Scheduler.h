@@ -1,25 +1,34 @@
 /**
  * @file Scheduler.h
- * @brief Cooperative multitasking scheduler using Timer1
+ * @brief Soft (millis-based) scheduler for non-time-critical tasks
  *
- * This module provides a priority-based cooperative scheduler for periodic tasks.
- * Timer1 generates a 1kHz interrupt (1ms period) that updates task ready flags.
- * The main loop calls tick() to execute the highest-priority ready task.
+ * This module provides a millis()-based soft scheduler for tasks that do NOT
+ * need hard real-time guarantees. It is safe to call from loop() even if loop()
+ * contains delay() or other blocking code — blocked time simply increases the
+ * jitter of soft tasks, but NEVER affects the hard real-time ISR tasks.
  *
- * Features:
- * - Up to 8 registered tasks
- * - Priority levels 0-7 (0 = highest priority)
- * - Non-preemptive (tasks run to completion)
- * - Deterministic timing via hardware timer
+ * Hard real-time tasks (DC motor PID, UART, sensors) are handled by ISR timers
+ * configured in ISRScheduler and SensorManager. Do NOT register those tasks here.
+ *
+ * Suitable for this scheduler (jitter-tolerant):
+ *   - LED animations (blink, breathe)
+ *   - Button / limit-switch polling
+ *   - NeoPixel status updates
+ *   - Battery warning LED
+ *   - User debug output
  *
  * Usage:
- *   Scheduler::init();                                  // Configure Timer1
- *   Scheduler::registerTask(callback, 5, 0);            // 5ms period, priority 0
- *   Scheduler::registerTask(callback2, 10, 1);          // 10ms period, priority 1
+ *   Scheduler::init();
+ *   Scheduler::registerTask(myCallback, 50, 0);   // 50 ms period, priority 0
  *
  *   void loop() {
- *     Scheduler::tick();  // Execute highest-priority ready task
+ *     Scheduler::tick();     // Run at most one task per call
+ *     // delay() or other blocking code here — ISRs are unaffected
  *   }
+ *
+ * tick() selects the highest-priority (lowest priority number) task whose
+ * period has elapsed and runs it. At most one task executes per tick() call.
+ * If multiple tasks are overdue, the next call handles the next one.
  */
 
 #ifndef SCHEDULER_H
@@ -27,82 +36,70 @@
 
 #include <Arduino.h>
 
-// Maximum number of tasks that can be registered
-#define MAX_TASKS               8
+// Maximum number of registered tasks
+#define MAX_TASKS   8
 
-// Task callback function type
+// Task callback type
 typedef void (*TaskCallback)(void);
 
 /**
- * @brief Task structure (internal use only)
+ * @brief Soft scheduler task descriptor (internal use)
  */
 struct Task {
-  TaskCallback callback;        // Function to call when task is ready
-  uint16_t period;              // Task period in milliseconds
-  uint16_t countdown;           // Countdown until next execution (ms)
-  uint8_t priority;             // Priority level (0 = highest)
-  bool enabled;                 // Is this task slot active?
-  volatile bool ready;          // Is task ready to run? (set by ISR)
+    TaskCallback callback;   // Function to call
+    uint16_t     period;     // Period in milliseconds
+    uint32_t     lastRunMs;  // millis() at last execution
+    uint8_t      priority;   // 0 = highest priority
+    bool         enabled;    // Slot active?
 };
 
 /**
- * @brief Cooperative multitasking scheduler
+ * @brief Millis-based soft scheduler
  */
 class Scheduler {
 public:
-  /**
-   * @brief Initialize Timer1 for 1kHz interrupts
-   *
-   * Configures Timer1 in CTC mode with OCR1A compare match at 1ms period.
-   * Must be called once in setup() before registering tasks.
-   */
-  static void init();
+    /**
+     * @brief Initialise the task registry (no timer hardware configured)
+     *
+     * Call once in setup(). Does NOT configure any hardware timer —
+     * Timer1 is now owned by ISRScheduler.
+     */
+    static void init();
 
-  /**
-   * @brief Register a periodic task
-   *
-   * @param callback Function to call when task period expires
-   * @param periodMs Task period in milliseconds (must be >= 1)
-   * @param priority Priority level (0 = highest, 7 = lowest)
-   * @return Task ID (0-7) on success, -1 if no slots available
-   *
-   * @note Tasks are NOT preemptive. Each task should complete quickly
-   *       to avoid delaying lower-priority tasks.
-   */
-  static int8_t registerTask(TaskCallback callback, uint16_t periodMs, uint8_t priority);
+    /**
+     * @brief Register a periodic task
+     *
+     * @param callback  Function to call when the period elapses
+     * @param periodMs  Task period in milliseconds (>= 1)
+     * @param priority  Priority level (0 = highest, 7 = lowest)
+     * @return Task ID (0–7) on success, -1 if no slots are available
+     */
+    static int8_t registerTask(TaskCallback callback, uint16_t periodMs, uint8_t priority);
 
-  /**
-   * @brief Execute the highest-priority ready task
-   *
-   * Call this function continuously from loop(). It will execute at most
-   * one task per call, selecting the highest-priority ready task.
-   *
-   * @note If no tasks are ready, this function returns immediately.
-   */
-  static void tick();
+    /**
+     * @brief Run the highest-priority overdue task (call from loop())
+     *
+     * Executes at most one task per call.  Returns immediately if no task
+     * is due.  Timing is best-effort — jitter equals the time spent in
+     * blocking code between tick() calls.
+     */
+    static void tick();
 
-  /**
-   * @brief Enable or disable a registered task
-   *
-   * @param taskId Task ID returned by registerTask()
-   * @param enabled True to enable, false to disable
-   * @return True on success, false if invalid task ID
-   */
-  static bool setTaskEnabled(int8_t taskId, bool enabled);
-
-  /**
-   * @brief Timer1 ISR handler (called internally)
-   *
-   * This function is called from the Timer1 COMPA interrupt at 1kHz.
-   * It updates task countdown timers and sets ready flags.
-   *
-   * @note Do NOT call this function directly. It is invoked by the ISR.
-   */
-  static void timerISR();
+    /**
+     * @brief Enable or disable a registered task
+     *
+     * Enabling a task resets its last-run timestamp to now, so it fires
+     * one period after re-enabling (not immediately).
+     *
+     * @param taskId  ID returned by registerTask()
+     * @param enabled True to enable, false to disable
+     * @return True on success, false for invalid ID
+     */
+    static bool setTaskEnabled(int8_t taskId, bool enabled);
 
 private:
-  static Task tasks[MAX_TASKS];   // Task registry
-  static uint8_t taskCount;       // Number of registered tasks
+    static Task    tasks[MAX_TASKS];
+    static uint8_t taskCount;
 };
 
 #endif // SCHEDULER_H

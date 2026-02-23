@@ -5,6 +5,7 @@
 
 #include "DCMotor.h"
 #include "../config.h"
+#include "../pins.h"
 
 // ============================================================================
 // PID CONTROLLER IMPLEMENTATION
@@ -87,6 +88,7 @@ DCMotor::DCMotor()
     , mode_(DC_MODE_DISABLED)
     , targetPosition_(0)
     , targetVelocity_(0.0f)
+    , directPwm_(0)
     , pwmOutput_(0)
     , currentMa_(-1)
     , maPerVolt_(1000.0f)
@@ -114,8 +116,10 @@ void DCMotor::setPins(uint8_t pinEN, uint8_t pinIN1, uint8_t pinIN2) {
     pinMode(pinIN1_, OUTPUT);
     pinMode(pinIN2_, OUTPUT);
 
-    // Initialize to stopped state
-    analogWrite(pinEN_, 0);
+    // Initialize to stopped state.
+    // Do NOT call analogWrite(pinEN_, 0) here — that would reconfigure the
+    // timer (Timer3 for M1_EN, Timer4 for M2_EN) and corrupt ISRScheduler's
+    // Fast PWM setup.  pinMode() already drives the pin LOW by default.
     digitalWrite(pinIN1_, LOW);
     digitalWrite(pinIN2_, LOW);
 }
@@ -190,9 +194,20 @@ void DCMotor::setVelocityPID(float kp, float ki, float kd) {
     velocityPID_.setLimits(-255.0f, 255.0f);
 }
 
+void DCMotor::setDirectPWM(int16_t pwm) {
+    directPwm_ = pwm;
+}
+
 void DCMotor::update() {
     if (mode_ == DC_MODE_DISABLED) {
         return;  // Motor is disabled, do nothing
+    }
+
+    // PWM mode: apply stored direct PWM immediately, skip PID
+    if (mode_ == DC_MODE_PWM) {
+        pwmOutput_ = directPwm_;
+        setPWM(pwmOutput_);
+        return;
     }
 
     if (!encoder_ || !velocityEst_) {
@@ -309,24 +324,51 @@ void DCMotor::setPWM(int16_t pwm) {
 
     // Apply motor direction inversion if configured
     if (invertDir_) {
-        pwm = -pwm;  // Flip direction
+        pwm = -pwm;
     }
 
-    // Set direction pins based on sign
+    // Determine direction and extract unsigned speed
+    uint8_t speed;
     if (pwm > 0) {
-        // Forward
         digitalWrite(pinIN1_, HIGH);
         digitalWrite(pinIN2_, LOW);
-        analogWrite(pinEN_, (uint8_t)pwm);
+        speed = (uint8_t)pwm;
     } else if (pwm < 0) {
-        // Reverse
         digitalWrite(pinIN1_, LOW);
         digitalWrite(pinIN2_, HIGH);
-        analogWrite(pinEN_, (uint8_t)(-pwm));
+        speed = (uint8_t)(-pwm);
     } else {
-        // Brake (both pins LOW = short motor terminals)
+        // Brake: both direction pins LOW
         digitalWrite(pinIN1_, LOW);
         digitalWrite(pinIN2_, LOW);
-        analogWrite(pinEN_, 0);
+        speed = 0;
     }
+
+    // Write speed to hardware PWM.
+    //
+    // Motors 0 and 1 (M1_EN / M2_EN) share their timer with an ISR, so
+    // analogWrite() is forbidden (it would reconfigure the timer and break
+    // the ISR rate).  Write OCRnx directly using the macros from pins.h.
+    // The OCR value is scaled from 0–255 to 0–ICRn to match the Fast PWM
+    // resolution.
+    //
+    // Motors 2 and 3 (M3_EN / M4_EN) are on Timer2 which is not used by
+    // any ISR, so analogWrite() is safe for those.
+
+#if defined(PIN_M1_EN_OCR)
+    if (motorId_ == 0) {
+        PIN_M1_EN_OCR = ((uint16_t)speed * PIN_M1_EN_ICR) / 255;
+        return;
+    }
+#endif
+
+#if defined(PIN_M2_EN_OCR)
+    if (motorId_ == 1) {
+        PIN_M2_EN_OCR = ((uint16_t)speed * PIN_M2_EN_ICR) / 255;
+        return;
+    }
+#endif
+
+    // M3 / M4: Timer2 is free — analogWrite() is safe
+    analogWrite(pinEN_, speed);
 }

@@ -10,7 +10,9 @@ firmware/
 │   ├── arduino.ino           # Entry point (setup/loop)
 │   └── src/                  # All firmware source code
 │       ├── config.h          # Compile-time configuration (edit this first)
-│       ├── pins.h            # All GPIO pin definitions
+│       ├── pins.h            # All GPIO pin definitions (swap for Rev A ↔ Rev B)
+│       ├── ISRScheduler.h/cpp  # Hard real-time ISR timer setup (Timer1 + Timer4)
+│       ├── Scheduler.h/cpp   # Soft millis-based cooperative scheduler (loop-driven)
 │       ├── drivers/          # Hardware abstractions
 │       │   ├── DCMotor       # H-bridge PWM + direction control
 │       │   ├── StepperMotor  # STEP/DIR/ENABLE stepper driver interface
@@ -25,7 +27,7 @@ firmware/
 │       │   ├── VelocityEstimator # Edge-timing velocity with moving-average filter
 │       │   ├── SensorManager    # IMU fusion (Madgwick AHRS) + mag calibration
 │       │   ├── PersistentStorage # EEPROM read/write (wheel geometry, mag cal)
-│       │   ├── MessageCenter    # TLV packet assembly and dispatch
+│       │   ├── MessageCenter    # TLV packet assembly, dispatch, and state machine
 │       │   ├── StepperManager   # Multi-motor step sequencing (Timer3 ISR)
 │       │   └── UserIO           # Buttons, LEDs, NeoPixel patterns
 │       └── lib/              # Vendored third-party libraries
@@ -42,7 +44,6 @@ firmware/
 │   ├── test_uart_tlv/
 │   ├── test_encoder/
 │   ├── test_dc_motor_pwm/
-│   ├── test_dc_motor_pid/
 │   ├── test_current_sensing/
 │   ├── test_servo/
 │   ├── test_stepper/
@@ -58,21 +59,56 @@ firmware/
 └── pin_table_rev_B.md        # Complete GPIO mapping — PCB Rev. B (in testing)
 ```
 
+---
+
+## How It Works
+
+**Boot and idle.** On power-up, the firmware initializes all hardware (motors, sensors, UART) and enters the **IDLE** state. In IDLE, no motors run, but the Arduino is listening and will respond to configuration commands and magnetometer calibration requests.
+
+**Starting up.** The Raspberry Pi sends a `SYS_CMD_START` message over UART. The firmware transitions to **RUNNING**, enables full telemetry (motor status, IMU, odometry, voltages), and begins accepting motor commands. If `SYS_CMD_STOP` is received, the firmware returns to IDLE and disables all actuators.
+
+**Command–telemetry loop.** All communication uses the [TLV v2.0 protocol](../COMMUNICATION_PROTOCOL.md). The Raspberry Pi sends typed commands (enable a motor, set velocity, move a stepper, set a servo position, etc.). The Arduino continuously streams back sensor data at rates appropriate to each subsystem — motor status and IMU at 100 Hz, voltage at 10 Hz, system health at 1–10 Hz.
+
+**Safety.** The firmware expects a heartbeat (any received TLV) at least every 500 ms. If the link goes silent, the liveness timer expires, all actuators are immediately disabled, and the NeoPixel turns red. An emergency stop (`SYS_CMD_ESTOP`) does the same and requires an explicit `SYS_CMD_RESET` to recover. All of this happens in hardware-interrupt-driven code on the Arduino — the Raspberry Pi cannot accidentally leave motors running if the link drops.
+
+**Scheduler.** A two-tier scheduling architecture ensures hard real-time guarantees for critical tasks even if `loop()` stalls:
+
+*Hard real-time (ISR-driven — unblockable):*
+
+| ISR | Rate | What it does |
+|-----|------|--------------|
+| TIMER1_OVF_vect | 200 Hz | DC Motor PID (every tick) |
+| TIMER1_OVF_vect | 100 Hz | UART comms + heartbeat safety (every 2nd tick) |
+| TIMER4_OVF_vect | 100 Hz | IMU + Fusion AHRS (`update100Hz`) |
+| TIMER4_OVF_vect | 50 Hz  | Lidar reads (`update50Hz`) |
+| TIMER4_OVF_vect | 10 Hz  | Voltages + Ultrasonic (`update10Hz`) |
+| TIMER3_OVF_vect | 10 kHz | Stepper pulse generation |
+
+*Soft real-time (millis-based, `loop()`-driven):*
+
+| Task | Rate | What it does |
+|------|------|--------------|
+| User I/O | 20 Hz | LED animations, button reads, NeoPixel status |
+
+---
+
 ## Features
 
 ### Communication
-- **TLV protocol** over UART at 1 Mbps (Serial2, pins 16/17 via level shifter)
+- **TLV v2.0 protocol** over UART at 1 Mbps (Serial2, pins 16/17 via level shifter)
 - Bidirectional: RPi sends commands, Arduino sends sensor data and status
-- CRC-checked frames; hardware safety timeout (500 ms, motors auto-disable)
+- CRC-checked frames; liveness timeout (500 ms default, configurable) auto-disables actuators
+- Firmware state machine: IDLE → RUNNING → ESTOP with explicit transitions
 - Debug output on USB Serial (Serial0) at 115200 baud
 
 ### DC Motors (4 channels)
 - H-bridge control via PWM (speed) + digital direction signals
 - Interrupt-driven quadrature encoder counting: **2x mode** (phase A only) or **4x mode** (both phases)
 - Edge-timing velocity estimator with configurable moving-average filter
-- **Cascade PID**: Position → Velocity → Torque (inner torque loop requires current sensing)
+- **Three control modes**: position cascade PID, velocity PID, or direct PWM (open loop)
 - All PID gains runtime-configurable via TLV commands
 - Per-motor direction inversion (corrects for reversed wiring)
+- Differential-drive odometry: x, y, heading computed from encoder deltas
 
 ### Stepper Motors (4 channels)
 - STEP/DIR/ENABLE interface compatible with A4988 / DRV8825 drivers
@@ -83,14 +119,15 @@ firmware/
 
 ### Servos (PCA9685)
 - Up to 16 servo channels via I2C PWM controller
-- Simple position command interface (angle or pulse width)
+- Per-channel enable/disable with global output enable control
+- Position command via pulse width (µs) or angle (degrees)
 
 ### IMU — ICM-20948 9-DoF
 - 3-axis accelerometer (mg), gyroscope (DPS), magnetometer (µT)
 - **Madgwick AHRS** sensor fusion via Fusion library (x-io Technologies)
-- Outputs: quaternion, Euler angles, earth-frame linear acceleration
+- Outputs: quaternion, earth-frame linear acceleration, raw sensor values
 - 9-DoF mode (with magnetometer) or 6-DoF fallback if uncalibrated
-- **Magnetometer hard-iron calibration**: interactive calibration command, stored to EEPROM
+- **Magnetometer hard-iron calibration**: interactive calibration via TLV command, offsets stored to EEPROM
 - IMU update rate: 100 Hz
 
 ### Distance Sensors (I2C via Qwiic)
@@ -101,7 +138,7 @@ firmware/
 ### Voltage Monitoring
 - Battery voltage (1:6 divider, 0–24 V range) at 10 Hz
 - 5V rail and servo rail monitors
-- Per-motor current sense (ADC) for torque feedback
+- Per-motor current sense (ADC) for current feedback
 
 ### Persistent Storage (EEPROM)
 - Survives power-off; ~100,000 write cycles per byte
@@ -114,20 +151,6 @@ firmware/
 - Status RGB LED: WS2812B NeoPixel (pin 42) — system state patterns
 - 3 user LEDs: green (pin 44), blue (pin 45), orange (pin 46) — PWM brightness control
 - 1 user LED: purple (pin 47) — digital only
-
-### Scheduler
-- Timer1-based cooperative scheduler at 1 kHz base tick
-- Configurable per-task frequencies (see `config.h`):
-
-| Task | Default Rate |
-|------|-------------|
-| DC motor PID | 200 Hz |
-| UART comms | 100 Hz |
-| IMU reading | 100 Hz |
-| LIDAR reading | 50 Hz |
-| UserIO (LEDs/buttons) | 20 Hz |
-| Ultrasonic reading | 15 Hz |
-| Voltage monitoring | 10 Hz |
 
 ---
 
@@ -180,108 +203,16 @@ Edit `src/config.h` before building:
 
 ## Test Sketches
 
-Each test in `firmware/tests/` is a standalone Arduino sketch that exercises one subsystem. Tests share the firmware source tree via a **symbolic link** (`src → ../../arduino/src`) — this is the standard Arduino IDE workaround for sharing source files across sketches.
+Each test in `firmware/tests/` is a standalone Arduino sketch that exercises one subsystem. All tests run at **115200 baud** on USB Serial (Serial0).
 
-### The `src` Symlink
-
-The Arduino IDE requires all source files to be inside the sketch folder. Each test directory contains a `src` symlink that points to the shared firmware source at `firmware/arduino/src/`. You must create this symlink after cloning the repo — it is **not stored in git**.
-
-#### Create symlinks — macOS / Linux
-
-```bash
-cd firmware/tests
-for dir in test_*/; do
-    ln -sf ../../arduino/src "$dir/src"
-done
-```
-
-Verify:
-```bash
-ls -la firmware/tests/test_scheduler/src
-# Should show: src -> ../../arduino/src
-```
-
-#### Create symlinks — Windows (PowerShell, run as Administrator)
-
-```powershell
-cd firmware\tests
-Get-ChildItem -Directory -Filter "test_*" | ForEach-Object {
-    $target = Resolve-Path "..\..\arduino\src"
-    $link   = Join-Path $_.FullName "src"
-    New-Item -ItemType Junction -Path $link -Target $target -Force
-}
-```
-
-> **Note:** Windows uses a **directory junction** instead of a symlink. Junctions work the same way with the Arduino IDE. You must run PowerShell as Administrator.
-
-#### Verify symlinks exist
-
-```bash
-# macOS / Linux
-ls -la firmware/tests/*/src
-
-# Windows PowerShell
-Get-ChildItem firmware\tests\test_*\src | Select-Object FullName, Target
-```
-
-### Building and Running a Test
-
-#### Arduino IDE
-
-1. Open the desired test sketch (e.g., `firmware/tests/test_encoder/test_encoder.ino`)
-2. Verify the `src` symlink exists in that folder
-3. Set board to **Arduino Mega 2560** and select your port
-4. Click **Upload**, then open **Serial Monitor** at 115200 baud
-
-#### arduino-cli
-
-```bash
-# macOS / Linux
-arduino-cli compile --fqbn arduino:avr:mega firmware/tests/test_encoder
-arduino-cli upload  --fqbn arduino:avr:mega --port /dev/ttyUSB0 firmware/tests/test_encoder
-
-# Windows PowerShell
-arduino-cli compile --fqbn arduino:avr:mega firmware\tests\test_encoder
-arduino-cli upload  --fqbn arduino:avr:mega --port COM3 firmware\tests\test_encoder
-```
-
-### Test Index
-
-| Test | What it tests | Serial Monitor |
-|------|---------------|----------------|
-| `test_scheduler` | Timer1 1kHz scheduler, task timing accuracy | 115200 baud |
-| `test_uart_tlv` | TLV packet encode/decode, loopback (TX→RX jumper needed) | 115200 baud |
-| `test_encoder` | Quadrature encoder counting (2x/4x), direction, velocity | 115200 baud |
-| `test_dc_motor_pwm` | Direct PWM motor control, H-bridge direction | 115200 baud |
-| `test_dc_motor_pid` | Closed-loop PID velocity and position control | 115200 baud |
-| `test_current_sensing` | ADC current sensor readings per motor | 115200 baud |
-| `test_servo` | PCA9685 servo commands, angle sweep | 115200 baud |
-| `test_stepper` | Stepper STEP/DIR pulses, acceleration, limit switch homing | 115200 baud |
-| `test_user_io` | Buttons, LEDs (PWM/blink/breathing), NeoPixel colors | 115200 baud |
-| `test_voltage` | ADC battery/rail voltage readings | 115200 baud |
-| `test_eeprom` | EEPROM read/write; power-cycle persistence demo | 115200 baud |
-| `test_i2c_scanner` | Scans I2C bus and prints all detected addresses | 115200 baud |
-
-### `test_eeprom` — Power-Cycle Demo
-
-This test teaches EEPROM persistence to students who have never used non-volatile memory:
-
-1. **Run 1**: Writes known values (wheel diameter, wheel base, mag offsets) → verifies immediate read-back → instructs you to power off
-2. **Run 2** (after power cycle): Reads values back → confirms data survived → **proves EEPROM is non-volatile**
-
-Serial commands while running:
-- `d` — dump raw EEPROM bytes with field annotations
-- `r` — erase all stored data (next boot = Run 1)
-- `w` — write test values again
-- `h` — help
+See **[firmware/tests/README.md](tests/README.md)** for:
+- How to create the required `src` symlink in each test directory
+- Build and upload instructions (Arduino IDE and arduino-cli)
+- Per-test hardware requirements, serial commands, and what to observe
 
 ---
 
 ## Known Issues
-
-### Rev. B — LED_RED PWM conflict (Timer 3)
-
-Rev. B moves `LED_RED` from pin 11 (Timer 1) to pin 5 (Timer 3). Timer 3 is already used for stepper pulse generation in CTC mode. **PWM brightness/breathing on LED_RED is not available in Rev. B** — only ON/OFF control works. See [notes/TIMER3_CONFLICT_ANALYSIS.md](notes/TIMER3_CONFLICT_ANALYSIS.md) for full analysis.
 
 ### EEPROM unused warning
 

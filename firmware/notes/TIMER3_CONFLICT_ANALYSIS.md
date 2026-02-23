@@ -1,6 +1,22 @@
 # Timer 3 Conflict Analysis: LED_RED PWM vs Stepper Pulse Generation
 
-## Executive Summary
+> **✅ RESOLVED — v0.8.0**
+>
+> The conflict described in this document has been fully resolved. Timer3 now runs in
+> **Fast PWM mode 14** (ICR3 as TOP) instead of CTC mode.  This frees OCR3A to drive
+> hardware PWM on OC3A (pin 5) independently while the OVF ISR fires at the same 10 kHz
+> rate.  Full LED_RED breathing is active in both Rev. A and Rev. B.
+>
+> **Implementation:** `StepperManager::init()` now configures `TCCR3A/B` for Fast PWM
+> mode 14 and conditionally connects OC3A via `#if defined(PIN_LED_RED_IS_OC3A)` /
+> `#if defined(PIN_M1_EN_IS_OC3A)`.  All PWM writes use direct `OCR3A` writes instead of
+> `analogWrite()` (which would reconfigure the timer).  See `pins.h` and `UserIO.cpp`.
+>
+> The original analysis below is preserved for educational reference.
+
+---
+
+## Executive Summary (Historical — Pre v0.8.0)
 
 **⚠️ CONFIRMED CONFLICT: LED_RED on pin 5 (Rev. B) CANNOT use PWM while Timer3 generates stepper pulses.**
 

@@ -13,7 +13,7 @@
 // FIRMWARE VERSION
 // ============================================================================
 
-#define FIRMWARE_VERSION        0x00070000  // Version 0.7.0 (Phase 7 - sensor refactor)
+#define FIRMWARE_VERSION        0x00080000  // Version 0.8.0 (Phase 8 - hard real-time ISR scheduler)
 
 // ============================================================================
 // HARDWARE CONFIGURATION
@@ -21,6 +21,10 @@
 
 // DC Motors
 #define NUM_DC_MOTORS           4       // Total DC motor channels
+#define DC_MOTOR_1              0       // DC motor index 1 (0-3)
+#define DC_MOTOR_2              1       // DC motor index 2 (0-3)
+#define DC_MOTOR_3              2       // DC motor index 3 (0-3)
+#define DC_MOTOR_4              3       // DC motor index 4 (0-3)
 
 // All DC motor channels are always initialized. Use DC_ENABLE TLV command at
 // runtime to activate specific motors. Set NUM_DC_MOTORS to reduce channel count.
@@ -34,6 +38,10 @@
 
 // Stepper Motors
 #define NUM_STEPPERS            4       // Total stepper channels
+#define STEPPER_1               0       // Stepper index 1 (0-3)
+#define STEPPER_2               1       // Stepper index 2 (0-3)
+#define STEPPER_3               2       // Stepper index 3 (0-3)
+#define STEPPER_4               3       // Stepper index 4 (0-3)
 
 // All stepper channels are always initialized. Use STEP_ENABLE TLV command at
 // runtime to activate specific steppers. Set NUM_STEPPERS to reduce channel count.
@@ -41,7 +49,7 @@
 // Servos (via PCA9685)
 #define NUM_SERVO_CHANNELS      16      // PCA9685 provides 16 channels
 
-#define SERVO_CONTROLLER_ENABLED 0      // Enable PCA9685 servo driver
+#define SERVO_CONTROLLER_ENABLED 1      // Enable PCA9685 servo driver
 
 // ============================================================================
 // ENCODER CONFIGURATION
@@ -68,20 +76,36 @@
 #define ENCODER_4_DIR_INVERTED  1       // 0=normal, 1=inverted
 
 // ============================================================================
+// DIFFERENTIAL DRIVE — WHEEL GEOMETRY AND MOTOR ASSIGNMENT
+// ============================================================================
+
+// Which DC motor index drives the left and right wheels.
+// Must be in range 0 to NUM_DC_MOTORS-1, and must be different from each other.
+// Positive encoder ticks for each wheel must mean "wheel moving forward".
+// If the count direction is wrong, set the corresponding ENCODER_N_DIR_INVERTED above.
+#define ODOM_LEFT_MOTOR             DC_MOTOR_1       // DC motor index for the left drive wheel (0-3)
+#define ODOM_RIGHT_MOTOR            DC_MOTOR_2       // DC motor index for the right drive wheel (0-3)
+
+// Default wheel geometry — loaded at boot before SYS_CONFIG arrives from the RPi.
+// Set either value to 0.0f to disable odometry until SYS_CONFIG is received.
+// Both values can be overridden at runtime via the SYS_CONFIG TLV command.
+#define DEFAULT_WHEEL_DIAMETER_MM   65.0f   // Outer diameter of each drive wheel (mm)
+#define DEFAULT_WHEEL_BASE_MM       150.0f  // Centre-to-centre axle distance (mm)
+
+// ============================================================================
 // TIMING CONFIGURATION
 // ============================================================================
 
-// Scheduler base tick (DO NOT CHANGE - Timer1 configured for 1kHz)
-#define SCHEDULER_TICK_FREQ_HZ  1000    // 1ms period
+// Hard real-time ISR frequencies (Timer1 and Timer4)
+#define DC_PID_FREQ_HZ          200     // DC motor PID ISR — Timer1 OVF (5 ms)
+#define UART_COMMS_FREQ_HZ      100     // UART comms ISR   — Timer1 OVF every 2nd tick (10 ms)
+#define SENSOR_UPDATE_FREQ_HZ   100     // IMU + Fusion ISR — Timer4 OVF /100 (10 ms)
+#define SENSOR_LIDAR_FREQ_HZ    50      // Lidar ISR        — every 2nd sensor tick (20 ms)
+#define SENSOR_ULTRASONIC_FREQ_HZ 10   // Ultrasonic ISR   — every 10th sensor tick (100 ms)
+#define SENSOR_VOLTAGE_FREQ_HZ  10      // Voltage ISR      — every 10th sensor tick (100 ms)
 
-// Task update frequencies
-#define DC_PID_FREQ_HZ          200     // DC motor PID loop (5ms period)
-#define UART_COMMS_FREQ_HZ      100     // UART communication (10ms period)
-#define SENSOR_UPDATE_FREQ_HZ   100     // IMU sensor reading (10ms period)
-#define SENSOR_LIDAR_FREQ_HZ    50      // Lidar reading (20ms period)
-#define SENSOR_ULTRASONIC_FREQ_HZ 15   // Ultrasonic reading (67ms period)
-#define SENSOR_VOLTAGE_FREQ_HZ  10      // Voltage monitoring (100ms period)
-#define USER_IO_FREQ_HZ         20      // LED/button update (50ms period)
+// Soft real-time frequencies (millis-based, loop-driven)
+#define USER_IO_FREQ_HZ         20      // LED/button update (50 ms)
 
 // Stepper pulse generation (Timer3)
 #define STEPPER_TIMER_FREQ_HZ   10000   // 10kHz interrupt rate (100µs period)
@@ -104,7 +128,7 @@
 
 // Device identification
 #define DEVICE_ID               0x01    // Arduino device ID for TLV protocol
-#define ENABLE_CRC_CHECK      1       // Enable CRC checks on TLV packets
+#define ENABLE_CRC_CHECK        1       // Enable CRC checks on TLV packets. Set to 0 to disable.
 
 // ============================================================================
 // VELOCITY ESTIMATION CONFIGURATION
@@ -190,6 +214,75 @@
 #define VSERVO_ENABLED          1       // Servo rail monitoring
 
 // ============================================================================
+// BATTERY TYPE CONFIGURATION
+// ============================================================================
+//
+// Set BATTERY_TYPE to the battery you have installed.
+// This automatically configures three voltage thresholds:
+//
+//   VBAT_WARN_V       — warn below this (LED blink, NeoPixel yellow, ERR flag)
+//   VBAT_CUTOFF_V     — disable motors below this (hard safety, same as heartbeat loss)
+//   VBAT_OVERVOLTAGE_V — warn above this (wrong charger / wrong chemistry)
+//
+// ── NiMH ────────────────────────────────────────────────────────────────────
+#define BATTERY_NIMH_8CELL    1   //  8-cell NiMH,  9.6 V nominal
+#define BATTERY_NIMH_10CELL   2   // 10-cell NiMH, 12.0 V nominal  ← DEFAULT
+// ── LiPo ────────────────────────────────────────────────────────────────────
+#define BATTERY_LIPO_2S       3   //  2S LiPo,  7.4 V nominal
+#define BATTERY_LIPO_3S       4   //  3S LiPo, 11.1 V nominal
+#define BATTERY_LIPO_4S       5   //  4S LiPo, 14.8 V nominal
+#define BATTERY_LIPO_5S       6   //  5S LiPo, 18.5 V nominal
+#define BATTERY_LIPO_6S       7   //  6S LiPo, 22.2 V nominal (⚠ near 24 V hw limit)
+// ── Custom ───────────────────────────────────────────────────────────────────
+#define BATTERY_CUSTOM        99  // Set VBAT_WARN_V/CUTOFF_V/OVERVOLTAGE_V manually
+
+// ── Selection ────────────────────────────────────────────────────────────────
+#define BATTERY_TYPE    BATTERY_NIMH_10CELL   // ← change this line to switch battery
+
+// ── Per-type thresholds ───────────────────────────────────────────────────────
+// NiMH thresholds use 1.05 V/cell warn, 1.00 V/cell cutoff, 1.55 V/cell over.
+// LiPo thresholds use 3.5 V/cell warn,  3.3 V/cell cutoff, 4.3 V/cell over.
+#if   BATTERY_TYPE == BATTERY_NIMH_8CELL
+  #define VBAT_WARN_V           8.4f   // 8 × 1.05 V
+  #define VBAT_CUTOFF_V         8.0f   // 8 × 1.00 V — disable motors (prevents over-discharge)
+  #define VBAT_OVERVOLTAGE_V   12.5f   // above max charge (~8 × 1.45 V)
+#elif BATTERY_TYPE == BATTERY_NIMH_10CELL
+  #define VBAT_WARN_V          10.5f   // 10 × 1.05 V
+  #define VBAT_CUTOFF_V        10.0f   // 10 × 1.00 V
+  #define VBAT_OVERVOLTAGE_V   15.5f   // above max charge (~10 × 1.45 V)
+#elif BATTERY_TYPE == BATTERY_LIPO_2S
+  #define VBAT_WARN_V           7.0f   // 2 × 3.5 V
+  #define VBAT_CUTOFF_V         6.6f   // 2 × 3.3 V — LiPo damage threshold
+  #define VBAT_OVERVOLTAGE_V    8.6f   // above 2 × 4.3 V
+#elif BATTERY_TYPE == BATTERY_LIPO_3S
+  #define VBAT_WARN_V          10.5f   // 3 × 3.5 V
+  #define VBAT_CUTOFF_V         9.9f   // 3 × 3.3 V
+  #define VBAT_OVERVOLTAGE_V   12.9f   // above 3 × 4.3 V
+#elif BATTERY_TYPE == BATTERY_LIPO_4S
+  #define VBAT_WARN_V          14.0f   // 4 × 3.5 V
+  #define VBAT_CUTOFF_V        13.2f   // 4 × 3.3 V
+  #define VBAT_OVERVOLTAGE_V   17.2f   // above 4 × 4.3 V
+#elif BATTERY_TYPE == BATTERY_LIPO_5S
+  #define VBAT_WARN_V          17.5f   // 5 × 3.5 V
+  #define VBAT_CUTOFF_V        16.5f   // 5 × 3.3 V
+  #define VBAT_OVERVOLTAGE_V   21.5f   // above 5 × 4.3 V
+#elif BATTERY_TYPE == BATTERY_LIPO_6S
+  #define VBAT_WARN_V          21.0f   // 6 × 3.5 V
+  #define VBAT_CUTOFF_V        19.8f   // 6 × 3.3 V
+  #define VBAT_OVERVOLTAGE_V   24.0f   // hw limit; 6S full charge = 25.2 V (not measurable)
+#elif BATTERY_TYPE == BATTERY_CUSTOM
+  // Define your own thresholds:
+  #define VBAT_WARN_V          10.5f
+  #define VBAT_CUTOFF_V        10.0f
+  #define VBAT_OVERVOLTAGE_V   16.0f
+#else
+  #error "Unknown BATTERY_TYPE — see BATTERY_TYPE options in config.h"
+#endif
+
+// Backward-compatible alias used by SensorManager::isBatteryLow()
+#define VBAT_LOW_THRESHOLD  VBAT_WARN_V
+
+// ============================================================================
 // VOLTAGE DIVIDER RATIOS (ADC INPUT SCALING)
 // ============================================================================
 
@@ -210,9 +303,6 @@
 // ADC reference voltage (Arduino Mega 2560)
 #define ADC_VREF                5.0f    // 5V reference
 #define ADC_RESOLUTION          1024    // 10-bit ADC
-
-// Low battery threshold (volts)
-#define VBAT_LOW_THRESHOLD      10.5f   // Warn below this voltage
 
 // ============================================================================
 // DC MOTOR CURRENT SENSING
@@ -267,7 +357,7 @@
 
 // Debug pins for oscilloscope timing measurement
 // These pins toggle on entry/exit of critical sections for timing analysis
-#define DEBUG_PINS_ENABLED      1
+#define DEBUG_PINS_ENABLED      0
 
 #if DEBUG_PINS_ENABLED
   #define DEBUG_PIN_ENCODER_ISR   A7    // Toggle on encoder ISR entry/exit
@@ -279,19 +369,6 @@
 // ============================================================================
 // COMPILE-TIME VALIDATION
 // ============================================================================
-
-// Ensure timer frequencies are valid
-#if (SCHEDULER_TICK_FREQ_HZ != 1000)
-  #error "SCHEDULER_TICK_FREQ_HZ must be 1000 Hz (Timer1 is hardcoded for 1ms)"
-#endif
-
-#if (DC_PID_FREQ_HZ > SCHEDULER_TICK_FREQ_HZ)
-  #error "DC_PID_FREQ_HZ cannot exceed SCHEDULER_TICK_FREQ_HZ"
-#endif
-
-#if (UART_COMMS_FREQ_HZ > SCHEDULER_TICK_FREQ_HZ)
-  #error "UART_COMMS_FREQ_HZ cannot exceed SCHEDULER_TICK_FREQ_HZ"
-#endif
 
 // Ensure encoder modes are valid
 #if (ENCODER_1_MODE != ENCODER_2X && ENCODER_1_MODE != ENCODER_4X)
@@ -308,6 +385,19 @@
 
 #if (ENCODER_4_MODE != ENCODER_2X && ENCODER_4_MODE != ENCODER_4X)
   #error "ENCODER_4_MODE must be ENCODER_2X or ENCODER_4X"
+#endif
+
+// Odometry motor assignment validation
+#if (ODOM_LEFT_MOTOR >= NUM_DC_MOTORS)
+  #error "ODOM_LEFT_MOTOR must be less than NUM_DC_MOTORS"
+#endif
+
+#if (ODOM_RIGHT_MOTOR >= NUM_DC_MOTORS)
+  #error "ODOM_RIGHT_MOTOR must be less than NUM_DC_MOTORS"
+#endif
+
+#if (ODOM_LEFT_MOTOR == ODOM_RIGHT_MOTOR)
+  #error "ODOM_LEFT_MOTOR and ODOM_RIGHT_MOTOR must be different motors"
 #endif
 
 #endif // CONFIG_H

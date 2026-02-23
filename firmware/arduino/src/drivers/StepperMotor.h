@@ -237,6 +237,16 @@ public:
     void setPosition(int32_t position);
 
     /**
+     * @brief Get current instantaneous speed
+     *
+     * Returns the velocity computed during the last motion profile step.
+     * 0 when idle.
+     *
+     * @return Speed in steps/second
+     */
+    uint32_t getCurrentSpeed() const { return (uint32_t)currentVelocity_; }
+
+    /**
      * @brief Get stepper ID
      *
      * @return Stepper identifier (0-3)

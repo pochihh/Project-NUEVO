@@ -1,20 +1,29 @@
 /**
  * @file SensorManager.h
- * @brief Centralized sensor management with multi-rate updates
+ * @brief Centralised sensor management with hard real-time ISR dispatch
  *
- * SensorManager aggregates all sensor subsystems and exposes a unified interface
- * for the rest of the firmware. It is called from the scheduler at two rates:
+ * SensorManager is driven by TIMER4_OVF_vect (configured in ISRScheduler)
+ * at a 10 kHz carrier rate.  An internal /100 counter reduces this to a
+ * 100 Hz dispatch tick.  Each tick calls isrTick(), which dispatches work
+ * at three rates using an internal 0–9 counter:
  *
- *   update()          — called at SENSOR_UPDATE_FREQ_HZ (100 Hz): reads IMU,
- *                       runs Fusion AHRS, samples voltages at 10 Hz sub-rate
- *   updateRange()     — called at SENSOR_LIDAR_FREQ_HZ (50 Hz): reads lidar;
- *                       ultrasonic sensors polled internally at 15 Hz sub-rate
+ *   update100Hz()  — every tick       → 100 Hz: IMU read + Fusion AHRS
+ *   update50Hz()   — even ticks       →  50 Hz: Lidar sensors
+ *   update10Hz()   — tick 0 only      →  10 Hz: Voltages + Ultrasonic
  *
- * Attached sensors are controlled by config.h compile-time flags:
- *   IMU_ENABLED, LIDAR_COUNT, ULTRASONIC_COUNT
+ * Call SensorManager::isrTick() from TIMER4_OVF_vect (already done in
+ * SensorManager.cpp — do not call it from loop() or the soft scheduler).
+ *
+ * ── How to add a new sensor ──────────────────────────────────────────────
+ *  1. Initialise the driver in init().
+ *  2. Add a member pointer/instance in the private section.
+ *  3. Place the read call in update100Hz(), update50Hz(), or update10Hz()
+ *     according to the sensor's required update rate.
+ *  4. Expose the result via a getter (see getLidarDistanceMm() as a model).
+ * ─────────────────────────────────────────────────────────────────────────
  *
  * Magnetometer Calibration State Machine
- * ----------------------------------------
+ * ────────────────────────────────────────
  * Calibration is only allowed in IDLE firmware state. The Bridge sends
  * SENSOR_MAG_CAL_CMD; the result is streamed back via SENSOR_MAG_CAL_STATUS.
  *
@@ -82,21 +91,17 @@ public:
     static void init();
 
     /**
-     * @brief Main sensor update — call at SENSOR_UPDATE_FREQ_HZ (100 Hz)
+     * @brief Hard real-time dispatch entry point (called from TIMER4_OVF_vect)
      *
-     * - Reads IMU (if data ready) and runs Fusion AHRS
-     * - Updates voltage readings at 10 Hz sub-rate
-     * - Updates mag calibration sampling if active
-     */
-    static void update();
-
-    /**
-     * @brief Range sensor update — call at SENSOR_LIDAR_FREQ_HZ (50 Hz)
+     * Dispatches sensor reads at three rates using an internal 0–9 counter:
+     *   - update100Hz()  every call       (100 Hz) — IMU + Fusion
+     *   - update50Hz()   every 2nd call   ( 50 Hz) — Lidar
+     *   - update10Hz()   every 10th call  ( 10 Hz) — Voltages + Ultrasonic
      *
-     * - Reads all lidar sensors at 50 Hz
-     * - Reads ultrasonic sensors at 15 Hz sub-rate (every ~3rd call)
+     * Do NOT call this from user code — it is invoked automatically by
+     * TIMER4_OVF_vect in SensorManager.cpp.
      */
-    static void updateRange();
+    static void isrTick();
 
     // ========================================================================
     // IMU / FUSION OUTPUT
@@ -178,7 +183,23 @@ public:
     static float getBatteryVoltage();
     static float get5VRailVoltage();
     static float getServoVoltage();
+
+    /**
+     * @brief Battery under-voltage checks
+     *
+     * isBatteryLow()      — below VBAT_WARN_V    → warning (LED blink, NeoPixel yellow)
+     * isBatteryCritical() — below VBAT_CUTOFF_V  → hard safety (motors disabled)
+     */
     static bool  isBatteryLow(float threshold = VBAT_LOW_THRESHOLD);
+    static bool  isBatteryCritical();
+
+    /**
+     * @brief Battery over-voltage check
+     *
+     * Returns true when battery is above VBAT_OVERVOLTAGE_V.
+     * Typically indicates wrong charger, wrong chemistry, or measurement error.
+     */
+    static bool  isBatteryOvervoltage();
 
     // ========================================================================
     // MAGNETOMETER CALIBRATION API
@@ -246,14 +267,10 @@ private:
     static uint16_t         lidarDistMm_[SENSOR_MAX_LIDARS];
     static uint16_t         ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS];
 
-    // Sub-rate counters
-    static uint8_t rangeCallCount_;     // increments each updateRange() call
-
     // ---- Voltages ----
     static float batteryVoltage_;
     static float rail5VVoltage_;
     static float servoVoltage_;
-    static uint8_t voltageCallCount_;   // increments each update(); sample at 10 Hz
 
     // ---- Magnetometer calibration ----
     static MagCalData magCal_;
@@ -262,6 +279,11 @@ private:
     static bool     initialized_;
     static uint32_t updateCount_;
     static uint32_t lastUpdateTime_;
+
+    // ---- ISR dispatch sub-tasks ----
+    static void update100Hz();   // IMU + Fusion AHRS          (100 Hz — every tick)
+    static void update50Hz();    // Lidar reads                ( 50 Hz — even ticks)
+    static void update10Hz();    // Voltages + Ultrasonic      ( 10 Hz — tick 0 only)
 
     // ---- Internal helpers ----
     static void initMagCalFromStorage();

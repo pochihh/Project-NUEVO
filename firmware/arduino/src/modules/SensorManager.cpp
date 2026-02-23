@@ -26,12 +26,9 @@ uint8_t          SensorManager::ultrasonicCount_   = 0;
 uint16_t         SensorManager::lidarDistMm_[SENSOR_MAX_LIDARS]           = {};
 uint16_t         SensorManager::ultrasonicDistMm_[SENSOR_MAX_ULTRASONICS] = {};
 
-uint8_t SensorManager::rangeCallCount_   = 0;
-
 float   SensorManager::batteryVoltage_   = 0.0f;
 float   SensorManager::rail5VVoltage_    = 0.0f;
 float   SensorManager::servoVoltage_     = 0.0f;
-uint8_t SensorManager::voltageCallCount_ = 0;
 
 MagCalData SensorManager::magCal_ = {
     MAG_CAL_IDLE, 0,
@@ -131,85 +128,109 @@ void SensorManager::init() {
 }
 
 // ============================================================================
-// UPDATE (100 Hz — IMU + Fusion + voltages at 10 Hz sub-rate)
+// TIMER4_OVF_vect ISR — 10 kHz carrier; /100 counter → 100 Hz dispatch
 // ============================================================================
 
-void SensorManager::update() {
+/**
+ * @brief Timer4 Overflow ISR
+ *
+ * Fires at 10 kHz (same carrier as stepper Timer3).  An internal counter
+ * divides this down to 100 Hz before invoking SensorManager::isrTick().
+ *
+ * sei() is called before isrTick() so the TWI (I2C) interrupt can fire
+ * during the sensor reads — Wire.h requires the TWI_vect to be serviced.
+ */
+ISR(TIMER4_OVF_vect) {
+    static uint8_t timerCounter = 0;
+    if (++timerCounter < 100) return;   // 10 kHz / 100 = 100 Hz dispatch
+    timerCounter = 0;
+    sei();   // Re-enable interrupts: Wire/TWI needs its own ISR during I2C reads
+    SensorManager::isrTick();
+}
+
+// ============================================================================
+// isrTick — 100 Hz dispatcher (called from TIMER4_OVF_vect)
+// ============================================================================
+
+void SensorManager::isrTick() {
     if (!initialized_) return;
+
+    static uint8_t counter = 0;
 
     lastUpdateTime_ = millis();
     updateCount_++;
 
-    // Voltage monitoring at 10 Hz (every 10th call at 100 Hz)
-    voltageCallCount_++;
-    if (voltageCallCount_ >= (SENSOR_UPDATE_FREQ_HZ / SENSOR_VOLTAGE_FREQ_HZ)) {
-        voltageCallCount_ = 0;
-        updateVoltages();
+    update100Hz();                        // every tick    (100 Hz)
+    if ((counter & 1) == 0) update50Hz(); // even ticks   ( 50 Hz)
+    if (counter == 0)        update10Hz(); // tick 0 only  ( 10 Hz)
+
+    if (++counter >= 10) counter = 0;
+}
+
+// ============================================================================
+// update100Hz — IMU + Fusion AHRS (100 Hz)
+// ============================================================================
+
+void SensorManager::update100Hz() {
+#if IMU_ENABLED
+    if (!imuInitialized_ || !imu_.dataReady()) return;
+
+    imu_.update();
+
+    uint32_t now   = micros();
+    float    dtSec = (now - lastImuMicros_) * 1e-6f;
+    lastImuMicros_ = now;
+
+    // Clamp dt: ignore startup spike or any gap > 100 ms
+    if (dtSec <= 0.0f || dtSec > 0.1f) dtSec = 1.0f / SENSOR_UPDATE_FREQ_HZ;
+
+    // Convert accel from mg → g for Fusion library
+    float ax = imu_.getAccX() * 0.001f;
+    float ay = imu_.getAccY() * 0.001f;
+    float az = imu_.getAccZ() * 0.001f;
+
+    if (isMagCalibrated()) {
+        // 9-DOF: fuse accelerometer, gyroscope, and calibrated magnetometer
+        fusion_.update(
+            imu_.getGyrX(), imu_.getGyrY(), imu_.getGyrZ(),
+            ax, ay, az,
+            imu_.getMagX(), imu_.getMagY(), imu_.getMagZ(),
+            dtSec
+        );
+    } else {
+        // 6-DOF fallback: no magnetometer (yaw drifts with gyro integration)
+        fusion_.updateNoMag(
+            imu_.getGyrX(), imu_.getGyrY(), imu_.getGyrZ(),
+            ax, ay, az,
+            dtSec
+        );
     }
 
-    // IMU + Fusion AHRS
-#if IMU_ENABLED
-    if (imuInitialized_ && imu_.dataReady()) {
-        imu_.update();
-
-        uint32_t now    = micros();
-        float    dtSec  = (now - lastImuMicros_) * 1e-6f;
-        lastImuMicros_  = now;
-
-        // Clamp dt to avoid large jumps on startup or scheduler hiccups
-        if (dtSec <= 0.0f || dtSec > 0.1f) dtSec = 1.0f / SENSOR_UPDATE_FREQ_HZ;
-
-        // Convert accel from mg → g for Fusion library input
-        float ax = imu_.getAccX() * 0.001f;
-        float ay = imu_.getAccY() * 0.001f;
-        float az = imu_.getAccZ() * 0.001f;
-
-        if (isMagCalibrated()) {
-            // 9-DOF: fuse accelerometer, gyroscope, and calibrated magnetometer
-            fusion_.update(
-                imu_.getGyrX(), imu_.getGyrY(), imu_.getGyrZ(),
-                ax, ay, az,
-                imu_.getMagX(), imu_.getMagY(), imu_.getMagZ(),
-                dtSec
-            );
-        } else {
-            // 6-DOF fallback: no magnetometer (yaw will drift)
-            fusion_.updateNoMag(
-                imu_.getGyrX(), imu_.getGyrY(), imu_.getGyrZ(),
-                ax, ay, az,
-                dtSec
-            );
-        }
-
-        // Update calibration sampling if active
-        if (magCal_.state == MAG_CAL_SAMPLING) {
-            updateMagCalSampling();
-        }
+    if (magCal_.state == MAG_CAL_SAMPLING) {
+        updateMagCalSampling();
     }
 #endif
 }
 
 // ============================================================================
-// UPDATE RANGE (50 Hz — lidar; 15 Hz sub-rate for ultrasonic)
+// update50Hz — Lidar reads (50 Hz)
 // ============================================================================
 
-void SensorManager::updateRange() {
-    if (!initialized_) return;
-
-    rangeCallCount_++;
-
-    // Lidar: read at every call (50 Hz)
+void SensorManager::update50Hz() {
     for (uint8_t i = 0; i < lidarCount_ && i < SENSOR_MAX_LIDARS; i++) {
         lidarDistMm_[i] = lidars_[i].getDistanceMm();
     }
+}
 
-    // Ultrasonic: read at 15 Hz sub-rate (every ~3rd call at 50 Hz)
-    // 50 / 15 ≈ 3.3 → read every 3rd call
-    if (rangeCallCount_ >= (SENSOR_LIDAR_FREQ_HZ / SENSOR_ULTRASONIC_FREQ_HZ)) {
-        rangeCallCount_ = 0;
-        for (uint8_t i = 0; i < ultrasonicCount_ && i < SENSOR_MAX_ULTRASONICS; i++) {
-            ultrasonicDistMm_[i] = ultrasonics_[i].getDistanceMm();
-        }
+// ============================================================================
+// update10Hz — Voltages + Ultrasonic (10 Hz)
+// ============================================================================
+
+void SensorManager::update10Hz() {
+    updateVoltages();
+
+    for (uint8_t i = 0; i < ultrasonicCount_ && i < SENSOR_MAX_ULTRASONICS; i++) {
+        ultrasonicDistMm_[i] = ultrasonics_[i].getDistanceMm();
     }
 }
 
@@ -259,6 +280,14 @@ float SensorManager::getServoVoltage()   { return servoVoltage_;   }
 
 bool SensorManager::isBatteryLow(float threshold) {
     return (batteryVoltage_ > 0.0f && batteryVoltage_ < threshold);
+}
+
+bool SensorManager::isBatteryCritical() {
+    return (batteryVoltage_ > 0.0f && batteryVoltage_ < VBAT_CUTOFF_V);
+}
+
+bool SensorManager::isBatteryOvervoltage() {
+    return (batteryVoltage_ > VBAT_OVERVOLTAGE_V);
 }
 
 // ============================================================================
@@ -420,7 +449,6 @@ uint16_t SensorManager::readADCAverage(uint8_t pin, uint8_t numSamples) {
     uint32_t sum = 0;
     for (uint8_t i = 0; i < numSamples; i++) {
         sum += analogRead(pin);
-        delayMicroseconds(100);
     }
     return (uint16_t)(sum / numSamples);
 }

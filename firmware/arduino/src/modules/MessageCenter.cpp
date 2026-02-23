@@ -1,34 +1,59 @@
 /**
  * @file MessageCenter.cpp
- * @brief Implementation of central message routing
+ * @brief Implementation of central message routing (TLV protocol v2.0)
  */
 
 #include "MessageCenter.h"
 #include "SensorManager.h"
 #include "UserIO.h"
+#include "../SystemManager.h"
 #include "../drivers/DCMotor.h"
 #include "../drivers/StepperMotor.h"
 #include "../drivers/ServoController.h"
 #include <string.h>
+#include <math.h>
 
 // External references to motor arrays (defined in arduino.ino)
-extern DCMotor dcMotors[NUM_DC_MOTORS];
+extern DCMotor      dcMotors[NUM_DC_MOTORS];
 extern StepperMotor steppers[NUM_STEPPERS];
 
 // ============================================================================
 // STATIC MEMBER INITIALIZATION
 // ============================================================================
 
-UARTDriver MessageCenter::uart_;
-uint32_t MessageCenter::lastHeartbeatMs_ = 0;
-bool MessageCenter::heartbeatValid_ = false;
-uint32_t MessageCenter::lastEncoderSendMs_ = 0;
-uint32_t MessageCenter::lastVoltageSendMs_ = 0;
-uint32_t MessageCenter::lastDCStatusSendMs_ = 0;
-uint32_t MessageCenter::lastStepStatusSendMs_ = 0;
-uint32_t MessageCenter::lastButtonSendMs_ = 0;
-uint32_t MessageCenter::lastStatusSendMs_ = 0;
-bool MessageCenter::initialized_ = false;
+UARTDriver  MessageCenter::uart_;
+uint32_t    MessageCenter::lastHeartbeatMs_   = 0;
+uint32_t    MessageCenter::lastCmdMs_         = 0;
+bool        MessageCenter::heartbeatValid_    = false;
+uint16_t    MessageCenter::heartbeatTimeoutMs_ = HEARTBEAT_TIMEOUT_MS;
+
+float       MessageCenter::wheelDiameterMm_  = DEFAULT_WHEEL_DIAMETER_MM;
+float       MessageCenter::wheelBaseMm_      = DEFAULT_WHEEL_BASE_MM;
+uint8_t     MessageCenter::motorDirMask_     = 0;
+uint8_t     MessageCenter::neoPixelCount_    = NEOPIXEL_COUNT;
+
+float       MessageCenter::odomX_           = 0.0f;
+float       MessageCenter::odomY_           = 0.0f;
+float       MessageCenter::odomTheta_       = 0.0f;
+int32_t     MessageCenter::prevLeftTicks_   = 0;
+int32_t     MessageCenter::prevRightTicks_  = 0;
+
+uint16_t    MessageCenter::servoEnabledMask_ = 0;
+uint16_t    MessageCenter::loopTimeAvgUs_    = 0;
+uint16_t    MessageCenter::loopTimeMaxUs_    = 0;
+uint16_t    MessageCenter::uartRxErrors_     = 0;
+
+uint32_t    MessageCenter::lastDCStatusSendMs_    = 0;
+uint32_t    MessageCenter::lastStepStatusSendMs_  = 0;
+uint32_t    MessageCenter::lastServoStatusSendMs_ = 0;
+uint32_t    MessageCenter::lastIMUSendMs_          = 0;
+uint32_t    MessageCenter::lastKinematicsSendMs_  = 0;
+uint32_t    MessageCenter::lastVoltageSendMs_     = 0;
+uint32_t    MessageCenter::lastIOStatusSendMs_    = 0;
+uint32_t    MessageCenter::lastStatusSendMs_      = 0;
+uint32_t    MessageCenter::lastMagCalSendMs_      = 0;
+
+bool        MessageCenter::initialized_ = false;
 
 // ============================================================================
 // INITIALIZATION
@@ -37,25 +62,17 @@ bool MessageCenter::initialized_ = false;
 void MessageCenter::init() {
     if (initialized_) return;
 
-    // Initialize UART driver
     uart_.init();
 
-    // Reset heartbeat timer
     lastHeartbeatMs_ = millis();
-    heartbeatValid_ = false;
-
-    // Reset telemetry timers
-    lastEncoderSendMs_ = 0;
-    lastVoltageSendMs_ = 0;
-    lastDCStatusSendMs_ = 0;
-    lastStepStatusSendMs_ = 0;
-    lastButtonSendMs_ = 0;
-    lastStatusSendMs_ = 0;
+    lastCmdMs_       = millis();
+    heartbeatValid_  = false;
+    SystemManager::requestTransition(SYS_STATE_IDLE);
 
     initialized_ = true;
 
 #ifdef DEBUG_TLV_PACKETS
-    DEBUG_SERIAL.println(F("[MessageCenter] Initialized"));
+    DEBUG_SERIAL.println(F("[MessageCenter] Initialized (v2.0)"));
 #endif
 }
 
@@ -65,67 +82,83 @@ void MessageCenter::init() {
 
 void MessageCenter::processIncoming() {
     uint32_t msgType;
-    uint8_t payload[MAX_TLV_PAYLOAD_SIZE];
+    uint8_t  payload[MAX_TLV_PAYLOAD_SIZE];
     uint32_t length;
 
-    // Process all available messages
     while (uart_.receive(&msgType, payload, &length)) {
-        // Valid message received - route it
         routeMessage(msgType, payload, length);
     }
 
-    // Check for heartbeat timeout
     checkHeartbeatTimeout();
 }
 
 void MessageCenter::sendTelemetry() {
     uint32_t currentMs = millis();
 
-    // Send encoder data at 100Hz
-    if (currentMs - lastEncoderSendMs_ >= (1000 / UART_COMMS_FREQ_HZ)) {
-        lastEncoderSendMs_ = currentMs;
-        sendEncoderData();
+    SystemState state    = SystemManager::getState();
+    bool running         = (state == SYS_STATE_RUNNING);
+    bool runningOrError  = (state == SYS_STATE_RUNNING ||
+                            state == SYS_STATE_ERROR);
+
+    // ---- 100 Hz telemetry (RUNNING only) ----
+    if (running) {
+        if (currentMs - lastDCStatusSendMs_ >= 10) {
+            lastDCStatusSendMs_ = currentMs;
+            sendDCStatusAll();
+        }
+
+        if (currentMs - lastStepStatusSendMs_ >= 10) {
+            lastStepStatusSendMs_ = currentMs;
+            sendStepStatusAll();
+        }
+
+        if (currentMs - lastKinematicsSendMs_ >= 10) {
+            lastKinematicsSendMs_ = currentMs;
+            sendSensorKinematics();
+        }
+
+        if (currentMs - lastIOStatusSendMs_ >= 10) {
+            lastIOStatusSendMs_ = currentMs;
+            sendIOStatus();
+        }
+
+        if (SensorManager::isIMUAvailable() &&
+            currentMs - lastIMUSendMs_ >= 10) {
+            lastIMUSendMs_ = currentMs;
+            sendSensorIMU();
+        }
+
+        // ---- 50 Hz telemetry ----
+        if (currentMs - lastServoStatusSendMs_ >= 20) {
+            lastServoStatusSendMs_ = currentMs;
+            sendServoStatusAll();
+        }
     }
 
-    // Send voltage data at 50Hz
-    if (currentMs - lastVoltageSendMs_ >= (1000 / SENSOR_UPDATE_FREQ_HZ)) {
+    // ---- 10 Hz voltage (RUNNING or ERROR) ----
+    if (runningOrError && currentMs - lastVoltageSendMs_ >= 100) {
         lastVoltageSendMs_ = currentMs;
         sendVoltageData();
     }
 
-    // Send DC motor status at 50Hz
-    if (currentMs - lastDCStatusSendMs_ >= (1000 / SENSOR_UPDATE_FREQ_HZ)) {
-        lastDCStatusSendMs_ = currentMs;
-        sendDCStatus();
-    }
-
-    // Send stepper status at 20Hz
-    if (currentMs - lastStepStatusSendMs_ >= (1000 / USER_IO_FREQ_HZ)) {
-        lastStepStatusSendMs_ = currentMs;
-        sendStepperStatus();
-    }
-
-    // Send button states when changed
-    static uint16_t prevButtonMask = 0;
-    static uint8_t prevLimitMask = 0;
-    uint16_t buttonMask = UserIO::getButtonStates();
-    uint8_t limitMask = (uint8_t)UserIO::getLimitStates();
-
-    if (buttonMask != prevButtonMask || limitMask != prevLimitMask) {
-        prevButtonMask = buttonMask;
-        prevLimitMask = limitMask;
-        sendButtonStates();
-    }
-
-    // Send system status at 1Hz
-    if (currentMs - lastStatusSendMs_ >= 1000) {
+    // ---- System status: 10 Hz (RUNNING/ERROR), 1 Hz otherwise ----
+    uint32_t statusInterval = runningOrError ? 100UL : 1000UL;
+    if (currentMs - lastStatusSendMs_ >= statusInterval) {
         lastStatusSendMs_ = currentMs;
         sendSystemStatus();
+    }
+
+    // ---- Mag cal status at 10 Hz while sampling ----
+    if (SensorManager::getMagCalData().state == MAG_CAL_SAMPLING) {
+        if (currentMs - lastMagCalSendMs_ >= 100) {
+            lastMagCalSendMs_ = currentMs;
+            sendMagCalStatus();
+        }
     }
 }
 
 // ============================================================================
-// HEARTBEAT MONITORING
+// LIVENESS MONITORING
 // ============================================================================
 
 bool MessageCenter::isHeartbeatValid() {
@@ -136,33 +169,10 @@ uint32_t MessageCenter::getTimeSinceHeartbeat() {
     return millis() - lastHeartbeatMs_;
 }
 
-void MessageCenter::updateHeartbeat() {
-    lastHeartbeatMs_ = millis();
-    heartbeatValid_ = true;
-}
-
 void MessageCenter::checkHeartbeatTimeout() {
-    if (getTimeSinceHeartbeat() > HEARTBEAT_TIMEOUT_MS) {
-        if (heartbeatValid_) {
-            // Heartbeat just timed out
-            heartbeatValid_ = false;
-
-#ifdef DEBUG_TLV_PACKETS
-            DEBUG_SERIAL.println(F("[MessageCenter] HEARTBEAT TIMEOUT!"));
-#endif
-
-            // Safety: Disable all DC motors
-            for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-                if (dcMotors[i].isEnabled()) {
-                    dcMotors[i].disable();
-                }
-            }
-
-            // Safety: Stop all steppers
-            for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
-                steppers[i].stop();
-            }
-        }
+    // Only mark heartbeat invalid — SafetyManager::check() responds on next 100 Hz tick
+    if (getTimeSinceHeartbeat() > (uint32_t)heartbeatTimeoutMs_) {
+        heartbeatValid_ = false;
     }
 }
 
@@ -171,89 +181,123 @@ void MessageCenter::checkHeartbeatTimeout() {
 // ============================================================================
 
 void MessageCenter::routeMessage(uint32_t type, const uint8_t* payload, uint32_t length) {
+    // Any received TLV resets the liveness timer
+    lastHeartbeatMs_ = millis();
+    heartbeatValid_  = true;
+
+    // Non-heartbeat commands update the command timer
+    if (type != SYS_HEARTBEAT) {
+        lastCmdMs_ = millis();
+    }
+
+    // ---- State-based command gating ----
+    SystemState state   = SystemManager::getState();
+    // Motor commands only accepted in RUNNING state
+    bool allowMotorCmds = (state == SYS_STATE_RUNNING);
+    // Config only accepted in IDLE state
+    bool allowConfig    = (state == SYS_STATE_IDLE);
+    // SYS_CMD and SYS_HEARTBEAT accepted in any state
+    // SYS_SET_PID accepted in IDLE or RUNNING
+    bool allowPID       = (state == SYS_STATE_IDLE || state == SYS_STATE_RUNNING);
+
     switch (type) {
+        // ---- System messages (always accepted) ----
         case SYS_HEARTBEAT:
-            if (length == sizeof(PayloadHeartbeat)) {
+            if (length == sizeof(PayloadHeartbeat))
                 handleHeartbeat((const PayloadHeartbeat*)payload);
-            }
+            break;
+
+        case SYS_CMD:
+            if (length == sizeof(PayloadSysCmd))
+                handleSysCmd((const PayloadSysCmd*)payload);
+            break;
+
+        case SYS_CONFIG:
+            if (allowConfig && length == sizeof(PayloadSysConfig))
+                handleSysConfig((const PayloadSysConfig*)payload);
             break;
 
         case SYS_SET_PID:
-            if (length == sizeof(PayloadSetPID)) {
+            if (allowPID && length == sizeof(PayloadSetPID))
                 handleSetPID((const PayloadSetPID*)payload);
-            }
             break;
 
+        // ---- DC motor commands (RUNNING only) ----
         case DC_ENABLE:
-            if (length == sizeof(PayloadDCEnable)) {
+            if (length == sizeof(PayloadDCEnable))
                 handleDCEnable((const PayloadDCEnable*)payload);
-            }
             break;
 
         case DC_SET_POSITION:
-            if (length == sizeof(PayloadDCSetPosition)) {
+            if (allowMotorCmds && length == sizeof(PayloadDCSetPosition))
                 handleDCSetPosition((const PayloadDCSetPosition*)payload);
-            }
             break;
 
         case DC_SET_VELOCITY:
-            if (length == sizeof(PayloadDCSetVelocity)) {
+            if (allowMotorCmds && length == sizeof(PayloadDCSetVelocity))
                 handleDCSetVelocity((const PayloadDCSetVelocity*)payload);
-            }
             break;
 
+        case DC_SET_PWM:
+            if (allowMotorCmds && length == sizeof(PayloadDCSetPWM))
+                handleDCSetPWM((const PayloadDCSetPWM*)payload);
+            break;
+
+        // ---- Stepper commands (RUNNING only) ----
         case STEP_ENABLE:
-            if (length == sizeof(PayloadStepEnable)) {
+            if (length == sizeof(PayloadStepEnable))
                 handleStepEnable((const PayloadStepEnable*)payload);
-            }
             break;
 
-        case STEP_SET_ACCEL:
-            if (length == sizeof(PayloadStepSetAccel)) {
-                handleStepSetAccel((const PayloadStepSetAccel*)payload);
-            }
-            break;
-
-        case STEP_SET_VEL:
-            if (length == sizeof(PayloadStepSetVel)) {
-                handleStepSetVel((const PayloadStepSetVel*)payload);
-            }
+        case STEP_SET_PARAMS:
+            if (allowMotorCmds && length == sizeof(PayloadStepSetParams))
+                handleStepSetParams((const PayloadStepSetParams*)payload);
             break;
 
         case STEP_MOVE:
-            if (length == sizeof(PayloadStepMove)) {
+            if (allowMotorCmds && length == sizeof(PayloadStepMove))
                 handleStepMove((const PayloadStepMove*)payload);
-            }
             break;
 
         case STEP_HOME:
-            if (length == sizeof(PayloadStepHome)) {
+            if (allowMotorCmds && length == sizeof(PayloadStepHome))
                 handleStepHome((const PayloadStepHome*)payload);
-            }
             break;
 
+        // ---- Servo commands ----
         case SERVO_ENABLE:
-            if (length == sizeof(PayloadServoEnable)) {
+            if (length == sizeof(PayloadServoEnable))
                 handleServoEnable((const PayloadServoEnable*)payload);
-            }
             break;
 
         case SERVO_SET:
             if (length == sizeof(PayloadServoSetSingle)) {
                 handleServoSet((const PayloadServoSetSingle*)payload);
+            } else if (length == sizeof(PayloadServoSetBulk)) {
+                // Bulk servo update
+                const PayloadServoSetBulk* b = (const PayloadServoSetBulk*)payload;
+                if ((uint16_t)b->startChannel + b->count <= NUM_SERVO_CHANNELS) {
+                    ServoController::setMultiplePositionsUs(
+                        b->startChannel, b->count, b->pulseUs);
+                }
             }
             break;
 
+        // ---- User I/O commands ----
         case IO_SET_LED:
-            if (length == sizeof(PayloadSetLED)) {
+            if (length == sizeof(PayloadSetLED))
                 handleSetLED((const PayloadSetLED*)payload);
-            }
             break;
 
         case IO_SET_NEOPIXEL:
-            if (length == sizeof(PayloadSetNeoPixel)) {
+            if (length == sizeof(PayloadSetNeoPixel))
                 handleSetNeoPixel((const PayloadSetNeoPixel*)payload);
-            }
+            break;
+
+        // ---- Magnetometer calibration (IDLE only) ----
+        case SENSOR_MAG_CAL_CMD:
+            if (allowConfig && length == sizeof(PayloadMagCalCmd))
+                handleMagCalCmd((const PayloadMagCalCmd*)payload);
             break;
 
         default:
@@ -270,26 +314,89 @@ void MessageCenter::routeMessage(uint32_t type, const uint8_t* payload, uint32_t
 // ============================================================================
 
 void MessageCenter::handleHeartbeat(const PayloadHeartbeat* payload) {
-    updateHeartbeat();
-
+    // Liveness timer already updated in routeMessage()
+    (void)payload;
 #ifdef DEBUG_TLV_PACKETS
-    DEBUG_SERIAL.print(F("[RX] Heartbeat: "));
+    DEBUG_SERIAL.print(F("[RX] Heartbeat ts="));
     DEBUG_SERIAL.println(payload->timestamp);
 #endif
 }
 
-void MessageCenter::handleSetPID(const PayloadSetPID* payload) {
-    if (payload->motorType == 0 && payload->motorId < NUM_DC_MOTORS) {
-        // DC motor PID tuning
-        DCMotor& motor = dcMotors[payload->motorId];
+void MessageCenter::handleSysCmd(const PayloadSysCmd* payload) {
+    switch ((SysCmdType)payload->command) {
+        case SYS_CMD_START:
+            if (SystemManager::requestTransition(SYS_STATE_RUNNING)) {
+#ifdef DEBUG_TLV_PACKETS
+                DEBUG_SERIAL.println(F("[SYS] → RUNNING"));
+#endif
+            }
+            break;
 
-        if (payload->loopType == 0) {
-            // Position PID
-            motor.setPositionPID(payload->kp, payload->ki, payload->kd);
-        } else if (payload->loopType == 1) {
-            // Velocity PID
-            motor.setVelocityPID(payload->kp, payload->ki, payload->kd);
-        }
+        case SYS_CMD_STOP:
+            if (SystemManager::requestTransition(SYS_STATE_IDLE)) {
+                disableAllActuators();
+#ifdef DEBUG_TLV_PACKETS
+                DEBUG_SERIAL.println(F("[SYS] → IDLE (stopped)"));
+#endif
+            }
+            break;
+
+        case SYS_CMD_RESET:
+            if (SystemManager::requestTransition(SYS_STATE_IDLE)) {
+                disableAllActuators();
+#ifdef DEBUG_TLV_PACKETS
+                DEBUG_SERIAL.println(F("[SYS] → IDLE (reset)"));
+#endif
+            }
+            break;
+
+        case SYS_CMD_ESTOP:
+            disableAllActuators();
+            SystemManager::requestTransition(SYS_STATE_ESTOP);
+#ifdef DEBUG_TLV_PACKETS
+            DEBUG_SERIAL.println(F("[SYS] → ESTOP"));
+#endif
+            break;
+
+        default:
+            break;
+    }
+}
+
+void MessageCenter::handleSysConfig(const PayloadSysConfig* payload) {
+    // IDLE state only — enforced by routeMessage()
+    if (payload->wheelDiameterMm != 0.0f)
+        wheelDiameterMm_ = payload->wheelDiameterMm;
+
+    if (payload->wheelBaseMm != 0.0f)
+        wheelBaseMm_ = payload->wheelBaseMm;
+
+    if (payload->neoPixelCount != 0)
+        neoPixelCount_ = payload->neoPixelCount;
+
+    if (payload->heartbeatTimeoutMs != 0)
+        heartbeatTimeoutMs_ = payload->heartbeatTimeoutMs;
+
+    // Apply direction mask changes (store; motors read this in sendSystemStatus)
+    if (payload->motorDirChangeMask != 0) {
+        motorDirMask_ = (motorDirMask_ & ~payload->motorDirChangeMask) |
+                        (payload->motorDirMask & payload->motorDirChangeMask);
+    }
+
+    if (payload->resetOdometry) {
+        resetOdometry();
+    }
+}
+
+void MessageCenter::handleSetPID(const PayloadSetPID* payload) {
+    if (payload->motorId >= NUM_DC_MOTORS) return;
+
+    DCMotor& motor = dcMotors[payload->motorId];
+
+    if (payload->loopType == 0) {
+        motor.setPositionPID(payload->kp, payload->ki, payload->kd);
+    } else if (payload->loopType == 1) {
+        motor.setVelocityPID(payload->kp, payload->ki, payload->kd);
     }
 }
 
@@ -302,25 +409,30 @@ void MessageCenter::handleDCEnable(const PayloadDCEnable* payload) {
 
     DCMotor& motor = dcMotors[payload->motorId];
 
-    if (payload->enable) {
-        motor.enable((DCMotorMode)payload->mode);
-    } else {
+    if (payload->mode == DC_MODE_DISABLED) {
         motor.disable();
+    } else {
+        motor.enable((DCMotorMode)payload->mode);
     }
 }
 
 void MessageCenter::handleDCSetPosition(const PayloadDCSetPosition* payload) {
     if (payload->motorId >= NUM_DC_MOTORS) return;
 
-    DCMotor& motor = dcMotors[payload->motorId];
-    motor.setTargetPosition(payload->targetPos);
+    dcMotors[payload->motorId].setTargetPosition(payload->targetTicks);
+    // maxVelTicks (velocity cap) is not exposed via current API; ignored.
 }
 
 void MessageCenter::handleDCSetVelocity(const PayloadDCSetVelocity* payload) {
     if (payload->motorId >= NUM_DC_MOTORS) return;
 
-    DCMotor& motor = dcMotors[payload->motorId];
-    motor.setTargetVelocity(payload->targetVel);
+    dcMotors[payload->motorId].setTargetVelocity((float)payload->targetTicks);
+}
+
+void MessageCenter::handleDCSetPWM(const PayloadDCSetPWM* payload) {
+    if (payload->motorId >= NUM_DC_MOTORS) return;
+
+    dcMotors[payload->motorId].setDirectPWM(payload->pwm);
 }
 
 // ============================================================================
@@ -330,46 +442,44 @@ void MessageCenter::handleDCSetVelocity(const PayloadDCSetVelocity* payload) {
 void MessageCenter::handleStepEnable(const PayloadStepEnable* payload) {
     if (payload->stepperId >= NUM_STEPPERS) return;
 
-    StepperMotor& stepper = steppers[payload->stepperId];
-
     if (payload->enable) {
-        stepper.enable();
+        steppers[payload->stepperId].enable();
     } else {
-        stepper.disable();
+        steppers[payload->stepperId].disable();
     }
 }
 
-void MessageCenter::handleStepSetAccel(const PayloadStepSetAccel* payload) {
+void MessageCenter::handleStepSetParams(const PayloadStepSetParams* payload) {
     if (payload->stepperId >= NUM_STEPPERS) return;
 
-    StepperMotor& stepper = steppers[payload->stepperId];
-    stepper.setAcceleration(payload->accel);
-}
-
-void MessageCenter::handleStepSetVel(const PayloadStepSetVel* payload) {
-    if (payload->stepperId >= NUM_STEPPERS) return;
-
-    StepperMotor& stepper = steppers[payload->stepperId];
-    stepper.setMaxVelocity(payload->maxVelocity);
+    StepperMotor& s = steppers[payload->stepperId];
+    s.setMaxVelocity((uint16_t)payload->maxVelocity);
+    s.setAcceleration((uint16_t)payload->acceleration);
 }
 
 void MessageCenter::handleStepMove(const PayloadStepMove* payload) {
     if (payload->stepperId >= NUM_STEPPERS) return;
 
-    StepperMotor& stepper = steppers[payload->stepperId];
+    StepperMotor& s = steppers[payload->stepperId];
 
     if (payload->moveType == STEP_MOVE_ABSOLUTE) {
-        stepper.moveToPosition(payload->target);
+        s.moveToPosition(payload->target);
     } else if (payload->moveType == STEP_MOVE_RELATIVE) {
-        stepper.moveSteps(payload->target);
+        s.moveSteps(payload->target);
     }
 }
 
 void MessageCenter::handleStepHome(const PayloadStepHome* payload) {
     if (payload->stepperId >= NUM_STEPPERS) return;
 
-    StepperMotor& stepper = steppers[payload->stepperId];
-    stepper.home(payload->direction);
+    StepperMotor& s = steppers[payload->stepperId];
+
+    // Apply home velocity if specified
+    if (payload->homeVelocity > 0) {
+        s.setMaxVelocity((uint16_t)payload->homeVelocity);
+    }
+
+    s.home(payload->direction);
 }
 
 // ============================================================================
@@ -377,10 +487,26 @@ void MessageCenter::handleStepHome(const PayloadStepHome* payload) {
 // ============================================================================
 
 void MessageCenter::handleServoEnable(const PayloadServoEnable* payload) {
-    if (payload->enable) {
-        ServoController::enable();
-    } else {
-        ServoController::disable();
+    if (payload->channel == 0xFF) {
+        // All channels
+        if (payload->enable) {
+            servoEnabledMask_ = 0xFFFF;
+            ServoController::enable();
+        } else {
+            servoEnabledMask_ = 0;
+            ServoController::disable();
+        }
+    } else if (payload->channel < NUM_SERVO_CHANNELS) {
+        if (payload->enable) {
+            servoEnabledMask_ |= (uint16_t)(1u << payload->channel);
+            // Ensure global outputs are enabled
+            if (!ServoController::isEnabled()) {
+                ServoController::enable();
+            }
+        } else {
+            servoEnabledMask_ &= (uint16_t)~(1u << payload->channel);
+            ServoController::setChannelOff(payload->channel);
+        }
     }
 }
 
@@ -407,9 +533,46 @@ void MessageCenter::handleSetNeoPixel(const PayloadSetNeoPixel* payload) {
     if (payload->index == 0xFF) {
         // Set all pixels
         UserIO::setNeoPixelColor(payload->red, payload->green, payload->blue);
-    } else if (payload->index < NEOPIXEL_COUNT) {
-        // Set specific pixel (for future multi-pixel support)
+    } else if (payload->index < neoPixelCount_) {
         UserIO::setNeoPixelColor(payload->red, payload->green, payload->blue);
+    }
+}
+
+// ============================================================================
+// MAGNETOMETER CALIBRATION HANDLER
+// ============================================================================
+
+void MessageCenter::handleMagCalCmd(const PayloadMagCalCmd* payload) {
+    // IDLE state only — enforced by routeMessage()
+    switch ((MagCalCmdType)payload->command) {
+        case MAG_CAL_START:
+            SensorManager::startMagCalibration();
+            lastMagCalSendMs_ = 0;  // Force immediate first status send
+            break;
+
+        case MAG_CAL_STOP:
+            SensorManager::cancelMagCalibration();
+            sendMagCalStatus();  // One final status
+            break;
+
+        case MAG_CAL_SAVE:
+            SensorManager::saveMagCalibration();
+            sendMagCalStatus();
+            break;
+
+        case MAG_CAL_APPLY:
+            SensorManager::applyMagCalibration(
+                payload->offsetX, payload->offsetY, payload->offsetZ);
+            sendMagCalStatus();
+            break;
+
+        case MAG_CAL_CLEAR:
+            SensorManager::clearMagCalibration();
+            sendMagCalStatus();
+            break;
+
+        default:
+            break;
     }
 }
 
@@ -417,114 +580,292 @@ void MessageCenter::handleSetNeoPixel(const PayloadSetNeoPixel* payload) {
 // TELEMETRY SENDERS
 // ============================================================================
 
-void MessageCenter::sendEncoderData() {
-    PayloadSensorEncoder payload;
+void MessageCenter::sendDCStatusAll() {
+    PayloadDCStatusAll payload;
 
-    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-        payload.position[i] = dcMotors[i].getPosition();
-        payload.velocity[i] = dcMotors[i].getVelocity();
+    for (uint8_t i = 0; i < 4; i++) {
+        DCMotorStatus& s = payload.motors[i];
+        s.mode       = (uint8_t)dcMotors[i].getMode();
+        s.faultFlags = 0;
+        s.position   = dcMotors[i].getPosition();
+        s.velocity   = (int32_t)dcMotors[i].getVelocity();
+        s.targetPos  = dcMotors[i].getTargetPosition();
+        s.targetVel  = (int32_t)dcMotors[i].getTargetVelocity();
+        s.pwmOutput  = dcMotors[i].getPWMOutput();
+        s.currentMa  = dcMotors[i].getCurrent();
+        s.posKp      = dcMotors[i].getPosKp();
+        s.posKi      = dcMotors[i].getPosKi();
+        s.posKd      = dcMotors[i].getPosKd();
+        s.velKp      = dcMotors[i].getVelKp();
+        s.velKi      = dcMotors[i].getVelKi();
+        s.velKd      = dcMotors[i].getVelKd();
     }
+
+    uart_.send(DC_STATUS_ALL, &payload, sizeof(payload));
+}
+
+void MessageCenter::sendStepStatusAll() {
+    PayloadStepStatusAll payload;
+
+    for (uint8_t i = 0; i < 4; i++) {
+        StepperStatus& s = payload.steppers[i];
+        s.enabled       = steppers[i].isEnabled() ? 1 : 0;
+        s.motionState   = (uint8_t)steppers[i].getState();
+        s.limitHit      = 0;
+        s.reserved      = 0;
+        s.commandedCount = steppers[i].getPosition();
+        s.targetCount   = steppers[i].getTargetPosition();
+        s.currentSpeed  = steppers[i].getCurrentSpeed();
+        s.maxSpeed      = steppers[i].getMaxVelocity();
+        s.acceleration  = steppers[i].getAcceleration();
+    }
+
+    uart_.send(STEP_STATUS_ALL, &payload, sizeof(payload));
+}
+
+void MessageCenter::sendServoStatusAll() {
+    PayloadServoStatusAll payload;
+
+    payload.pca9685Connected = 1;  // Assumed connected when SERVO_CONTROLLER_ENABLED
+    payload.pca9685Error     = 0;
+    payload.enabledMask      = servoEnabledMask_;
+
+    for (uint8_t i = 0; i < 16; i++) {
+        if (servoEnabledMask_ & (1u << i)) {
+            payload.pulseUs[i] = ServoController::getPositionUs(i);
+        } else {
+            payload.pulseUs[i] = 0;
+        }
+    }
+
+    uart_.send(SERVO_STATUS_ALL, &payload, sizeof(payload));
+}
+
+void MessageCenter::sendSensorIMU() {
+    if (!SensorManager::isIMUAvailable()) return;
+
+    PayloadSensorIMU payload;
+
+    SensorManager::getQuaternion(
+        payload.quatW, payload.quatX, payload.quatY, payload.quatZ);
+    SensorManager::getEarthAcceleration(
+        payload.earthAccX, payload.earthAccY, payload.earthAccZ);
+
+    payload.rawAccX  = SensorManager::getRawAccX();
+    payload.rawAccY  = SensorManager::getRawAccY();
+    payload.rawAccZ  = SensorManager::getRawAccZ();
+    payload.rawGyroX = SensorManager::getRawGyrX();
+    payload.rawGyroY = SensorManager::getRawGyrY();
+    payload.rawGyroZ = SensorManager::getRawGyrZ();
+    payload.magX     = SensorManager::getRawMagX();
+    payload.magY     = SensorManager::getRawMagY();
+    payload.magZ     = SensorManager::getRawMagZ();
+
+    payload.magCalibrated = SensorManager::isMagCalibrated() ? 1 : 0;
+    payload.reserved      = 0;
+    payload.timestamp     = micros();
+
+    uart_.send(SENSOR_IMU, &payload, sizeof(payload));
+}
+
+void MessageCenter::sendSensorKinematics() {
+    updateOdometry();
+
+    PayloadSensorKinematics payload;
+    payload.x     = odomX_;
+    payload.y     = odomY_;
+    payload.theta = odomTheta_;
+
+    // Instantaneous velocities in mm/s (from motor velocity estimates)
+    if (wheelDiameterMm_ > 0.0f) {
+        static const uint8_t kEncModes[4] = {
+            ENCODER_1_MODE, ENCODER_2_MODE, ENCODER_3_MODE, ENCODER_4_MODE
+        };
+        const float mmPerTickL =
+            (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_LEFT_MOTOR]);
+        const float mmPerTickR =
+            (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_RIGHT_MOTOR]);
+
+        float vLeft  = dcMotors[ODOM_LEFT_MOTOR].getVelocity() * mmPerTickL;
+        float vRight = dcMotors[ODOM_RIGHT_MOTOR].getVelocity() * mmPerTickR;
+
+        payload.vx     = (vLeft + vRight) * 0.5f;
+        payload.vy     = 0.0f;  // Always 0 for differential drive
+        payload.vTheta = (wheelBaseMm_ > 0.0f)
+                         ? (vRight - vLeft) / wheelBaseMm_
+                         : 0.0f;
+    } else {
+        payload.vx = payload.vy = payload.vTheta = 0.0f;
+    }
+
     payload.timestamp = micros();
 
-    uart_.send(SENSOR_ENCODER, &payload, sizeof(payload));
+    uart_.send(SENSOR_KINEMATICS, &payload, sizeof(payload));
 }
 
 void MessageCenter::sendVoltageData() {
     PayloadSensorVoltage payload;
 
-    payload.batteryMv = (uint16_t)(SensorManager::getBatteryVoltage() * 1000);
-    payload.rail5vMv = (uint16_t)(SensorManager::get5VRailVoltage() * 1000);
-    payload.servoRailMv = (uint16_t)(SensorManager::getServoVoltage() * 1000);
-    payload.reserved = 0;
+    payload.batteryMv  = (uint16_t)(SensorManager::getBatteryVoltage() * 1000.0f);
+    payload.rail5vMv   = (uint16_t)(SensorManager::get5VRailVoltage()  * 1000.0f);
+    payload.servoRailMv = (uint16_t)(SensorManager::getServoVoltage()  * 1000.0f);
+    payload.reserved   = 0;
 
     uart_.send(SENSOR_VOLTAGE, &payload, sizeof(payload));
 }
 
-void MessageCenter::sendDCStatus() {
-    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-        PayloadDCStatus payload;
+void MessageCenter::sendIOStatus() {
+    // Variable-length payload: 10 bytes fixed + 3 bytes per NeoPixel
+    uint8_t buf[10 + 3 * NEOPIXEL_COUNT];
+    memset(buf, 0, sizeof(buf));
 
-        payload.motorId = i;
-        payload.enabled = dcMotors[i].isEnabled() ? 1 : 0;
-        payload.mode = (uint8_t)dcMotors[i].getMode();
-        payload.faultFlags = 0;  // No fault detection yet
-        payload.position = dcMotors[i].getPosition();
-        payload.velocity = dcMotors[i].getVelocity();
-        payload.targetPos = dcMotors[i].getTargetPosition();
-        payload.targetVel = dcMotors[i].getTargetVelocity();
-        payload.pwmOutput = dcMotors[i].getPWMOutput();
-        payload.currentMa = -1;  // Current sensing not implemented
+    PayloadIOStatus* p = (PayloadIOStatus*)buf;
+    p->buttonMask        = UserIO::getButtonStates();
+    p->ledBrightness[0]  = 0;  // LED brightness getters not yet exposed in UserIO
+    p->ledBrightness[1]  = 0;
+    p->ledBrightness[2]  = 0;
+    p->reserved          = 0;
+    p->timestamp         = millis();
+    // NeoPixel RGB bytes appended as zero (no getter available yet)
 
-        uart_.send(DC_STATUS, &payload, sizeof(payload));
-    }
-}
+    uint8_t sendLen = 10 + (uint8_t)(neoPixelCount_ * 3);
+    if (sendLen > sizeof(buf)) sendLen = sizeof(buf);
 
-void MessageCenter::sendStepperStatus() {
-    for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
-        PayloadStepStatus payload;
-
-        payload.stepperId = i;
-        payload.enabled = steppers[i].isEnabled() ? 1 : 0;
-        payload.state = (uint8_t)steppers[i].getState();
-        payload.limitHit = 0;  // TODO: Read from limit switches
-        payload.position = steppers[i].getPosition();
-        payload.targetPos = steppers[i].getTargetPosition();
-        payload.currentVel = 0;  // Velocity not tracked by StepperMotor
-        payload.stepsRemaining = steppers[i].getStepsRemaining();
-
-        uart_.send(STEP_STATUS, &payload, sizeof(payload));
-    }
-}
-
-void MessageCenter::sendButtonStates() {
-    PayloadButtonState buttonPayload;
-    buttonPayload.buttonMask = UserIO::getButtonStates();
-    buttonPayload.changedMask = 0;  // TODO: Track changes
-    buttonPayload.timestamp = millis();
-    uart_.send(IO_BUTTON_STATE, &buttonPayload, sizeof(buttonPayload));
-
-    PayloadLimitState limitPayload;
-    limitPayload.limitMask = (uint8_t)UserIO::getLimitStates();
-    limitPayload.changedMask = 0;  // TODO: Track changes
-    limitPayload.reserved = 0;
-    limitPayload.timestamp = millis();
-    uart_.send(IO_LIMIT_STATE, &limitPayload, sizeof(limitPayload));
+    uart_.send(IO_STATUS, buf, sendLen);
 }
 
 void MessageCenter::sendSystemStatus() {
     PayloadSystemStatus payload;
+    memset(&payload, 0, sizeof(payload));
 
-    payload.uptimeMs = millis();
-    payload.lastHeartbeatMs = getTimeSinceHeartbeat();
-    payload.batteryMv = (uint16_t)(SensorManager::getBatteryVoltage() * 1000);
-    payload.rail5vMv = (uint16_t)(SensorManager::get5VRailVoltage() * 1000);
-    payload.servoRailMv = (uint16_t)(SensorManager::getServoVoltage() * 1000);
+    payload.firmwareMajor = (FIRMWARE_VERSION >> 24) & 0xFF;
+    payload.firmwareMinor = (FIRMWARE_VERSION >> 16) & 0xFF;
+    payload.firmwarePatch = (FIRMWARE_VERSION >> 8)  & 0xFF;
+    payload.state         = (uint8_t)SystemManager::getState();
+    payload.uptimeMs      = millis();
+    payload.lastRxMs      = getTimeSinceHeartbeat();
+    payload.lastCmdMs     = millis() - lastCmdMs_;
+    payload.batteryMv     = (uint16_t)(SensorManager::getBatteryVoltage() * 1000.0f);
+    payload.rail5vMv      = (uint16_t)(SensorManager::get5VRailVoltage()  * 1000.0f);
 
-    // Set error flags
+    // Error flags
     payload.errorFlags = ERR_NONE;
-    if (SensorManager::isBatteryLow()) {
-        payload.errorFlags |= ERR_LOW_BATTERY;
-    }
-    if (!heartbeatValid_) {
-        payload.errorFlags |= ERR_HEARTBEAT_LOST;
-    }
+    if (SensorManager::isBatteryLow())        payload.errorFlags |= ERR_UNDERVOLTAGE;
+    if (SensorManager::isBatteryOvervoltage()) payload.errorFlags |= ERR_OVERVOLTAGE;
+    if (!heartbeatValid_)                      payload.errorFlags |= ERR_LIVENESS_LOST;
 
-    // Set motor enable masks
-    payload.motorEnableMask = 0;
-    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-        if (dcMotors[i].isEnabled()) {
-            payload.motorEnableMask |= (1 << i);
-        }
-    }
+    // Attached sensors bitmask: bit0=IMU, bit1=Lidar, bit2=Ultrasonic
+    if (SensorManager::isIMUAvailable())           payload.attachedSensors |= 0x01;
+    if (SensorManager::getLidarCount() > 0)        payload.attachedSensors |= 0x02;
+    if (SensorManager::getUltrasonicCount() > 0)   payload.attachedSensors |= 0x04;
 
-    payload.stepperEnableMask = 0;
-    for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
-        if (steppers[i].isEnabled()) {
-            payload.stepperEnableMask |= (1 << i);
-        }
-    }
+    payload.freeSram         = getFreeRAM();
+    payload.loopTimeAvgUs    = loopTimeAvgUs_;
+    payload.loopTimeMaxUs    = loopTimeMaxUs_;
+    payload.uartRxErrors     = uartRxErrors_;
+    payload.wheelDiameterMm  = wheelDiameterMm_;
+    payload.wheelBaseMm      = wheelBaseMm_;
+    payload.motorDirMask     = motorDirMask_;
+    payload.neoPixelCount    = neoPixelCount_;
+    payload.heartbeatTimeoutMs = heartbeatTimeoutMs_;
+    payload.limitSwitchMask  = 0;
 
-    payload.reserved = 0;
+    // 0xFF = no home limit GPIO configured for this stepper
+    memset(payload.stepperHomeLimitGpio, 0xFF, sizeof(payload.stepperHomeLimitGpio));
 
     uart_.send(SYS_STATUS, &payload, sizeof(payload));
+}
+
+void MessageCenter::sendMagCalStatus() {
+    const MagCalData& cal = SensorManager::getMagCalData();
+
+    PayloadMagCalStatus payload;
+    payload.state        = (uint8_t)cal.state;
+    payload.sampleCount  = cal.sampleCount;
+    payload.reserved     = 0;
+    payload.minX         = cal.minX;
+    payload.maxX         = cal.maxX;
+    payload.minY         = cal.minY;
+    payload.maxY         = cal.maxY;
+    payload.minZ         = cal.minZ;
+    payload.maxZ         = cal.maxZ;
+    payload.offsetX      = cal.offsetX;
+    payload.offsetY      = cal.offsetY;
+    payload.offsetZ      = cal.offsetZ;
+    payload.savedToEeprom = cal.savedToEeprom ? 1 : 0;
+    memset(payload.reserved2, 0, sizeof(payload.reserved2));
+
+    uart_.send(SENSOR_MAG_CAL_STATUS, &payload, sizeof(payload));
+}
+
+// ============================================================================
+// HELPERS
+// ============================================================================
+
+void MessageCenter::disableAllActuators() {
+    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
+        if (dcMotors[i].isEnabled()) dcMotors[i].disable();
+    }
+    for (uint8_t i = 0; i < NUM_STEPPERS; i++) {
+        steppers[i].stop();
+    }
+    ServoController::disable();
+    servoEnabledMask_ = 0;
+}
+
+void MessageCenter::updateOdometry() {
+    // Requires wheel geometry to be configured
+    if (wheelDiameterMm_ <= 0.0f || wheelBaseMm_ <= 0.0f) return;
+
+    // Encoder modes indexed by motor ID — resolves automatically with ODOM_*_MOTOR config
+    static const uint8_t kEncModes[4] = {
+        ENCODER_1_MODE, ENCODER_2_MODE, ENCODER_3_MODE, ENCODER_4_MODE
+    };
+
+    int32_t leftTicks  = dcMotors[ODOM_LEFT_MOTOR].getPosition();
+    int32_t rightTicks = dcMotors[ODOM_RIGHT_MOTOR].getPosition();
+
+    int32_t dL = leftTicks  - prevLeftTicks_;
+    int32_t dR = rightTicks - prevRightTicks_;
+    prevLeftTicks_  = leftTicks;
+    prevRightTicks_ = rightTicks;
+
+    if (dL == 0 && dR == 0) return;  // No movement, skip trig
+
+    const float mmPerTickL =
+        (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_LEFT_MOTOR]);
+    const float mmPerTickR =
+        (PI * wheelDiameterMm_) / (float)(ENCODER_PPR * kEncModes[ODOM_RIGHT_MOTOR]);
+
+    float dLeft   = (float)dL * mmPerTickL;
+    float dRight  = (float)dR * mmPerTickR;
+    float dCenter = (dLeft + dRight) * 0.5f;
+    float dTheta  = (dRight - dLeft) / wheelBaseMm_;
+
+    // Midpoint heading for integration (reduces discretization error)
+    float headingMid = odomTheta_ + dTheta * 0.5f;
+    odomX_     += dCenter * cosf(headingMid);
+    odomY_     += dCenter * sinf(headingMid);
+    odomTheta_ += dTheta;
+}
+
+void MessageCenter::resetOdometry() {
+    odomX_     = 0.0f;
+    odomY_     = 0.0f;
+    odomTheta_ = 0.0f;
+    prevLeftTicks_  = dcMotors[ODOM_LEFT_MOTOR].getPosition();
+    prevRightTicks_ = dcMotors[ODOM_RIGHT_MOTOR].getPosition();
+}
+
+uint16_t MessageCenter::getFreeRAM() {
+    extern int __heap_start, *__brkval;
+    uint8_t v;
+    const uint8_t* stackPtr = &v;
+    const uint8_t* heapEnd  = (__brkval == 0)
+                               ? (const uint8_t*)&__heap_start
+                               : (const uint8_t*)__brkval;
+    if (stackPtr > heapEnd) {
+        return (uint16_t)(stackPtr - heapEnd);
+    }
+    return 0;
 }

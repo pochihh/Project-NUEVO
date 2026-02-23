@@ -1,33 +1,38 @@
 /**
  * @file arduino.ino
  * @brief Main firmware for Arduino Mega 2560 educational robotics platform
- * @version 0.6.0
+ * @version 0.8.0
  *
  * Educational robotics platform firmware for MAE 162 course.
  * Provides real-time motor control, sensor integration, and
  * communication with Raspberry Pi 5 via TLV protocol over UART.
  *
- * Architecture:
- * - Cooperative scheduler using Timer1 @ 1kHz
- * - Hardware interrupts for encoders (INT0-INT5)
- * - Timer3 @ 10kHz for stepper pulse generation
- * - Priority-based task execution in main loop
+ * Two-tier scheduling architecture:
+ *
+ *   Hard real-time (ISR-driven — unaffected by loop() blocking):
+ *     TIMER1_OVF_vect  200 Hz  DC motor PID always
+ *                      100 Hz  UART comms + heartbeat safety (every 2nd tick)
+ *     TIMER3_OVF_vect  10 kHz  Stepper pulse generation (StepperManager)
+ *     TIMER4_OVF_vect  100 Hz  IMU/Lidar/Voltage dispatch (SensorManager)
+ *
+ *   Soft real-time (millis-based, runs in loop()):
+ *     taskUserIO        20 Hz  LED animations, buttons, NeoPixel status
  *
  * Initialization Order (setup):
- * 1. Debug serial (Serial0)
- * 2. Scheduler (Timer1)
- * 3. MessageCenter (Serial2 + TLV codec)
- * 4. SensorManager (I2C, ADC)
- * 5. UserIO (GPIO, NeoPixel)
- * 6. ServoController (PCA9685 via I2C)
- * 7. StepperManager (Timer3)
- * 8. DC Motors (PWM pins, encoder counters)
- * 9. Attach encoder ISRs
- * 10. Register scheduler tasks
+ *  1. Debug serial (Serial0)
+ *  2. Scheduler (millis-based soft scheduler)
+ *  3. MessageCenter (Serial2 + TLV codec)
+ *  4. SensorManager (I2C, ADC)
+ *  5. UserIO (GPIO, NeoPixel)
+ *  6. ServoController (PCA9685 via I2C)
+ *  7. StepperManager (Timer3 — also starts stepper ISR)
+ *  8. DC Motors (PWM pins, encoder counters)
+ *  9. Attach encoder ISRs
+ * 10. Register soft-scheduler tasks
+ * 11. ISRScheduler::init() — LAST: starts Timer1 and Timer4 ISRs
  *
  * Main Loop:
- * - Scheduler::tick() executes highest-priority ready task
- * - Task priorities: 0=DC PID, 1=UART Comms, 2=Sensors, 3=User I/O
+ * - Scheduler::tick() executes highest-priority ready soft task
  */
 
 // ============================================================================
@@ -38,9 +43,12 @@
 #include "src/config.h"
 #include "src/pins.h"
 #include "src/Scheduler.h"
+#include "src/ISRScheduler.h"
+#include "src/SystemManager.h"
 
 // Communication
 #include "src/modules/MessageCenter.h"
+#include "src/modules/SafetyManager.h"
 #include "src/messages/TLV_Payloads.h"
 
 // DC motor control
@@ -99,99 +107,84 @@ DCMotor dcMotors[NUM_DC_MOTORS];
 StepperMotor steppers[NUM_STEPPERS];
 
 // ============================================================================
-// TASK CALLBACKS
+// HARD REAL-TIME ISR — TIMER1_OVF_vect (200 Hz / 100 Hz)
 // ============================================================================
 
 /**
- * @brief DC Motor PID control loop (200 Hz, Priority 0)
+ * @brief Timer1 Overflow ISR — DC Motor PID (200 Hz) + UART (100 Hz)
  *
- * Updates all enabled DC motor PID controllers.
- * Runs every 5ms (200Hz) with highest priority for smooth control.
+ * Fires at 200 Hz (5 ms period).
+ *   - Every tick:       DC motor PID update for all enabled motors.
+ *   - Every other tick: UART comms (process incoming, send telemetry) and
+ *                       heartbeat safety check (disables actuators if expired).
+ *
+ * Timer1 is configured in Fast PWM mode 14 by ISRScheduler::init().
+ * OC1A (pin 11) simultaneously drives LED_RED hardware PWM in Rev A.
  */
-void taskDCMotorPID() {
-#ifdef DEBUG_PINS_ENABLED
+ISR(TIMER1_OVF_vect) {
+#if DEBUG_PINS_ENABLED
   digitalWrite(DEBUG_PIN_PID_LOOP, HIGH);
 #endif
 
-  // Update all DC motor PID controllers
+  // ── 200 Hz: DC motor PID ────────────────────────────────────────────────
   for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
     dcMotors[i].update();
   }
 
-#ifdef DEBUG_PINS_ENABLED
+  // ── 200 Hz: Green LED heartbeat (1 Hz toggle = 2 s blink period) ────────
+  // Toggles every 200 PID ticks, giving a visible "scheduler alive" indicator.
+  static uint8_t greenCounter = 0;
+  static bool    greenState   = false;
+  if (++greenCounter >= 200) {
+    greenCounter = 0;
+    greenState   = !greenState;
+    digitalWrite(PIN_LED_GREEN, greenState ? HIGH : LOW);
+  }
+
+  // ── 100 Hz: buttons + UART comms + safety check ─────────────────────────
+  static bool uartTick = false;
+  uartTick = !uartTick;
+  if (uartTick) {
+    // Button reads at 100 Hz — fast GPIO only, no millis/delay
+    UserIO::readButtons();
+
+    // Process incoming TLV messages and send telemetry
+    MessageCenter::processIncoming();
+    MessageCenter::sendTelemetry();
+
+    // Centralised hard RT safety check (heartbeat + battery faults → ERROR)
+    SafetyManager::check();
+  }
+
+#if DEBUG_PINS_ENABLED
   digitalWrite(DEBUG_PIN_PID_LOOP, LOW);
 #endif
 }
 
-/**
- * @brief UART communication and safety timeout (100 Hz, Priority 1)
- *
- * Processes incoming TLV messages from Raspberry Pi.
- * Checks heartbeat timeout and disables motors if expired.
- * Runs every 10ms (100Hz).
- */
-void taskUARTComms() {
-  // Process incoming TLV messages
-  MessageCenter::processIncoming();
-
-  // Send outgoing telemetry
-  MessageCenter::sendTelemetry();
-
-  // Safety timeout check - disable all motors if heartbeat lost
-  if (!MessageCenter::isHeartbeatValid()) {
-    // Disable DC motors
-    for (uint8_t i = 0; i < NUM_DC_MOTORS; i++) {
-      dcMotors[i].disable();
-    }
-
-    // Disable stepper motors
-    StepperManager::disableAll();
-
-    // Disable servo outputs
-#if SERVO_CONTROLLER_ENABLED
-    ServoController::disable();
-#endif
-  }
-}
+// ============================================================================
+// SOFT TASK — taskUserIO (20 Hz, millis-based)
+// ============================================================================
 
 /**
- * @brief Sensor reading and data transmission (50 Hz, Priority 2)
+ * @brief User I/O updates (20 Hz, soft scheduler)
  *
- * Reads all enabled sensors (IMU, voltage, encoders).
- * Telemetry transmission handled by MessageCenter.
- * Runs every 20ms (50Hz).
- */
-void taskSensorRead() {
-  // Update all sensors
-  SensorManager::update();
-
-  // Check for low battery and update status LED
-  if (SensorManager::isBatteryLow()) {
-    UserIO::setLED(LED_RED, LED_BLINK, 255, 1000);
-  }
-}
-
-/**
- * @brief User I/O updates (20 Hz, Priority 3)
- *
- * Updates LED animations (blink, breathe patterns).
- * Reads button states and limit switches.
- * Updates NeoPixel system status indicator.
- * Runs every 50ms (20Hz).
+ * Runs LED animations (blink, breathe, RED battery warnings).
+ * Reads limit switches.
+ * Drives NeoPixel state animations via UserIO::updateNeoPixelAnimation()
+ * (INIT=yellow, IDLE=breathing emerald, RUNNING=rainbow, ERROR=flashing red).
+ * Button reads are handled at 100 Hz inside TIMER1_OVF_vect via readButtons().
  */
 void taskUserIO() {
-  // Update all user I/O (buttons, LEDs, NeoPixel)
+  // LED animations + limit switches + NeoPixel state animation
   UserIO::update();
 
-  // Update system status on NeoPixel
-  if (!MessageCenter::isHeartbeatValid()) {
-    UserIO::setSystemStatus(STATUS_ERROR);  // Red for timeout
+  // RED LED battery warnings (independent of NeoPixel system-state animation)
+  if (SensorManager::isBatteryOvervoltage()) {
+    UserIO::setLED(LED_RED, LED_BLINK, 255, 250);   // Fast blink — wrong battery/charger
+  } else if (SensorManager::isBatteryCritical()) {
+    UserIO::setLED(LED_RED, LED_BLINK, 255, 250);   // Fast blink — shutdown imminent
   } else if (SensorManager::isBatteryLow()) {
-    UserIO::setSystemStatus(STATUS_WARNING);  // Yellow for low battery
-  } else if (StepperManager::anyMoving() || dcMotors[0].getMode() != DC_MODE_DISABLED) {
-    UserIO::setSystemStatus(STATUS_BUSY);  // Cyan for active
-  } else {
-    UserIO::setSystemStatus(STATUS_OK);  // Green for ready
+    UserIO::setLED(LED_RED, LED_BLINK, 255, 1000);  // Slow blink — low warning
   }
 }
 
@@ -208,13 +201,13 @@ void taskUserIO() {
  */
 
 void encoderISR_M1() {
-#ifdef DEBUG_PINS_ENABLED
+#if DEBUG_PINS_ENABLED
   digitalWrite(DEBUG_PIN_ENCODER_ISR, HIGH);
 #endif
 
   encoder1.onInterruptA();
 
-#ifdef DEBUG_PINS_ENABLED
+#if DEBUG_PINS_ENABLED
   digitalWrite(DEBUG_PIN_ENCODER_ISR, LOW);
 #endif
 }
@@ -237,6 +230,11 @@ void encoderISR_M4() {
 
 void setup() {
   // ------------------------------------------------------------------------
+  // Initialize SystemManager (sets INIT state before any module starts)
+  // ------------------------------------------------------------------------
+  SystemManager::init();
+
+  // ------------------------------------------------------------------------
   // Initialize Debug Serial (USB)
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.begin(DEBUG_BAUD_RATE);
@@ -246,17 +244,17 @@ void setup() {
 
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println(F("========================================"));
-  DEBUG_SERIAL.println(F("  MAE 162 Robot Firmware v0.6.0"));
+  DEBUG_SERIAL.println(F("  MAE 162 Robot Firmware v0.8.0"));
   DEBUG_SERIAL.println(F("========================================"));
   DEBUG_SERIAL.println();
 
   // ------------------------------------------------------------------------
-  // Initialize Scheduler (Timer1 @ 1kHz)
+  // Initialize Soft Scheduler (millis-based)
   // ------------------------------------------------------------------------
-  DEBUG_SERIAL.println(F("[Setup] Initializing scheduler..."));
+  DEBUG_SERIAL.println(F("[Setup] Initializing soft scheduler..."));
   Scheduler::init();
 
-#ifdef DEBUG_PINS_ENABLED
+#if DEBUG_PINS_ENABLED
   // Configure debug pins for oscilloscope timing measurement
   pinMode(DEBUG_PIN_ENCODER_ISR, OUTPUT);
   pinMode(DEBUG_PIN_STEPPER_ISR, OUTPUT);
@@ -373,62 +371,40 @@ void setup() {
   DEBUG_SERIAL.println(F("  - Motor 4 encoder ISR attached"));
 
   // ------------------------------------------------------------------------
-  // Register Scheduler Tasks
+  // Register Soft Scheduler Tasks
+  // DC Motor PID, UART comms, and sensors are now hard real-time ISR tasks
+  // (Timer1 @ 200/100 Hz and Timer4 @ 100 Hz).  Only UserIO stays soft.
   // ------------------------------------------------------------------------
-  DEBUG_SERIAL.println(F("[Setup] Registering scheduler tasks..."));
+  DEBUG_SERIAL.println(F("[Setup] Registering soft scheduler tasks..."));
 
-  // Task registration:
-  //   Scheduler::registerTask(callback, periodMs, priority)
-  //
-  // Priority levels (lower number = higher priority):
-  //   0 - DC Motor PID (200 Hz, 5ms period)
-  //   1 - UART Communication (100 Hz, 10ms period)
-  //   2 - Sensor Reading (50 Hz, 20ms period)
-  //   3 - User I/O (20 Hz, 50ms period)
-
-  int8_t taskId;
-
-  taskId = Scheduler::registerTask(taskDCMotorPID, 1000 / DC_PID_FREQ_HZ, 0);
-  if (taskId >= 0) {
-    DEBUG_SERIAL.print(F("  - DC Motor PID: Task #"));
-    DEBUG_SERIAL.print(taskId);
-    DEBUG_SERIAL.print(F(" @ "));
-    DEBUG_SERIAL.print(1000 / DC_PID_FREQ_HZ);
-    DEBUG_SERIAL.println(F("ms (Priority 0)"));
-  }
-
-  taskId = Scheduler::registerTask(taskUARTComms, 1000 / UART_COMMS_FREQ_HZ, 1);
-  if (taskId >= 0) {
-    DEBUG_SERIAL.print(F("  - UART Comms: Task #"));
-    DEBUG_SERIAL.print(taskId);
-    DEBUG_SERIAL.print(F(" @ "));
-    DEBUG_SERIAL.print(1000 / UART_COMMS_FREQ_HZ);
-    DEBUG_SERIAL.println(F("ms (Priority 1)"));
-  }
-
-  taskId = Scheduler::registerTask(taskSensorRead, 1000 / SENSOR_UPDATE_FREQ_HZ, 2);
-  if (taskId >= 0) {
-    DEBUG_SERIAL.print(F("  - Sensor Read: Task #"));
-    DEBUG_SERIAL.print(taskId);
-    DEBUG_SERIAL.print(F(" @ "));
-    DEBUG_SERIAL.print(1000 / SENSOR_UPDATE_FREQ_HZ);
-    DEBUG_SERIAL.println(F("ms (Priority 2)"));
-  }
-
-  taskId = Scheduler::registerTask(taskUserIO, 1000 / USER_IO_FREQ_HZ, 3);
+  int8_t taskId = Scheduler::registerTask(taskUserIO, 1000 / USER_IO_FREQ_HZ, 0);
   if (taskId >= 0) {
     DEBUG_SERIAL.print(F("  - User I/O: Task #"));
     DEBUG_SERIAL.print(taskId);
     DEBUG_SERIAL.print(F(" @ "));
     DEBUG_SERIAL.print(1000 / USER_IO_FREQ_HZ);
-    DEBUG_SERIAL.println(F("ms (Priority 3)"));
+    DEBUG_SERIAL.println(F("ms"));
   }
+
+  // ------------------------------------------------------------------------
+  // Transition to IDLE (all hardware initialized, ready to receive commands)
+  // ------------------------------------------------------------------------
+  SystemManager::requestTransition(SYS_STATE_IDLE);
+  DEBUG_SERIAL.println(F("[Setup] System state → IDLE"));
+
+  // ------------------------------------------------------------------------
+  // Start Hard Real-Time ISRs (MUST be last — ISRs fire immediately)
+  // ------------------------------------------------------------------------
+  DEBUG_SERIAL.println(F("[Setup] Starting hard real-time ISRs (Timer1 + Timer4)..."));
+  ISRScheduler::init();
 
   // ------------------------------------------------------------------------
   // Setup Complete
   // ------------------------------------------------------------------------
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println(F("[Setup] Initialization complete!"));
+  DEBUG_SERIAL.println(F("  Hard RT: PID@200Hz, UART@100Hz, Sensors@100Hz (Timer1/3/4)"));
+  DEBUG_SERIAL.println(F("  Soft RT: UserIO@20Hz (millis-based)"));
   DEBUG_SERIAL.println(F("[Setup] Entering main loop..."));
   DEBUG_SERIAL.println();
 }

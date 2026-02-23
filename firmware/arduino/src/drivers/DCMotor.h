@@ -101,6 +101,11 @@ public:
      */
     float getOutput() const { return output_; }
 
+    // PID gain getters (for telemetry)
+    float getKp() const { return kp_; }
+    float getKi() const { return ki_; }
+    float getKd() const { return kd_; }
+
 private:
     float kp_;              // Proportional gain
     float ki_;              // Integral gain
@@ -223,6 +228,24 @@ public:
      */
     void setVelocityPID(float kp, float ki, float kd);
 
+    /**
+     * @brief Set direct PWM output (PWM mode only)
+     *
+     * Only applied when motor is in DC_MODE_PWM. Stored and applied on
+     * the next update() call.
+     *
+     * @param pwm PWM value (-255 to +255, negative = reverse)
+     */
+    void setDirectPWM(int16_t pwm);
+
+    // PID gain getters for DC_STATUS_ALL telemetry
+    float getPosKp() const { return positionPID_.getKp(); }
+    float getPosKi() const { return positionPID_.getKi(); }
+    float getPosKd() const { return positionPID_.getKd(); }
+    float getVelKp() const { return velocityPID_.getKp(); }
+    float getVelKi() const { return velocityPID_.getKi(); }
+    float getVelKd() const { return velocityPID_.getKd(); }
+
     // ========================================================================
     // CONTROL UPDATE
     // ========================================================================
@@ -304,6 +327,7 @@ private:
     DCMotorMode mode_;                      // Current control mode
     int32_t targetPosition_;                // Target position (ticks)
     float targetVelocity_;                  // Target velocity (ticks/sec)
+    int16_t directPwm_;                     // Direct PWM command (DC_MODE_PWM only)
     int16_t pwmOutput_;                     // Current PWM output (-255 to +255)
     int16_t currentMa_;                     // Motor current in milliamps (-1 if not available)
     float maPerVolt_;                       // Current sensor scaling (mA/V)

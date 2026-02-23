@@ -76,7 +76,7 @@ Hardware Interrupt Priority Levels (Interrupt Nesting DISABLED - Arduino Default
 │       - When triggered, run immediately if no ISR active   │
 ├────────────────────────────────────────────────────────────┤
 │ MEDIUM-HIGH: Timer1 (Scheduler tick @ 1kHz)                │ ← Vector 19-22
-│              - When triggered, run immediately if no ISR active│
+│       - When triggered, run immediately if no ISR active   │
 ├────────────────────────────────────────────────────────────┤
 │ MEDIUM: Timer3 (Stepper pulses @ 10kHz)                    │ ← Vector 34-38
 │         - When triggered, run immediately if no ISR active │

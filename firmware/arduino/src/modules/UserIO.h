@@ -98,6 +98,15 @@ public:
     // ========================================================================
 
     /**
+     * @brief Read all button GPIO states — ISR-safe (no millis/delay)
+     *
+     * Updates volatile buttonStates_ and prevButtonStates_.
+     * Call from TIMER1_OVF_vect at 100 Hz for responsive button detection.
+     * Replaces the old updateButtons() call that was inside update().
+     */
+    static void readButtons();
+
+    /**
      * @brief Check if button is currently pressed
      *
      * Buttons are active low (pressed = LOW, released = HIGH).
@@ -223,12 +232,16 @@ private:
     };
     static LEDState leds_[LED_COUNT];
 
-    // Button state tracking
-    static uint16_t buttonStates_;      // Current button states
-    static uint16_t prevButtonStates_;  // Previous button states
+    // Button state tracking (volatile — written by ISR via readButtons(), read by soft task)
+    static volatile uint16_t buttonStates_;
+    static volatile uint16_t prevButtonStates_;
 
     // Limit switch state tracking
     static uint8_t limitStates_;
+
+    // NeoPixel animation state machine
+    static uint8_t     animPhase_;       // Animation frame counter (0-255, wraps)
+    static SystemState lastAnimState_;   // Detected state change → resets animPhase_
 
     // Initialization flag
     static bool initialized_;
@@ -238,14 +251,31 @@ private:
     // ========================================================================
 
     /**
-     * @brief Update LED animations
+     * @brief Update LED animations (blink, breathe)
      */
     static void updateLEDs();
 
     /**
-     * @brief Update button states
+     * @brief Update NeoPixel animation based on SystemManager::getState()
+     *
+     * Called from update() at 20 Hz. Drives state-based animations:
+     *   INIT    — static yellow
+     *   IDLE    — slow breathing emerald (~3 s period)
+     *   RUNNING — rainbow hue sweep (~3.2 s full cycle)
+     *   ERROR   — fast flashing red with slight hue shift (0.5 s period)
+     *   ESTOP   — solid bright red
      */
-    static void updateButtons();
+    static void updateNeoPixelAnimation();
+
+    /**
+     * @brief Convert HSV to RGB (fast integer implementation, /256 approximation)
+     *
+     * @param h Hue 0-255 (0=red, 85=green, 170=blue)
+     * @param s Saturation 0-255
+     * @param v Value/brightness 0-255
+     */
+    static void hsvToRgb(uint8_t h, uint8_t s, uint8_t v,
+                         uint8_t& r, uint8_t& g, uint8_t& b);
 
     /**
      * @brief Update limit switch states

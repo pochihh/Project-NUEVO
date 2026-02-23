@@ -18,11 +18,15 @@ bool StepperManager::initialized_ = false;
 // ============================================================================
 
 /**
- * @brief Timer3 Compare Match A Interrupt
+ * @brief Timer3 Overflow Interrupt
  *
- * Fires at 10kHz (100µs period) for stepper pulse generation.
+ * Fires at 10 kHz (100 µs period) for stepper pulse generation.
+ *
+ * Timer3 is configured in Fast PWM mode 14 (ICR3 as TOP) instead of CTC
+ * so that OC3A can independently drive hardware PWM on pin 5 while the OVF
+ * ISR still fires at 10 kHz.  See ISRScheduler.h for the full explanation.
  */
-ISR(TIMER3_COMPA_vect) {
+ISR(TIMER3_OVF_vect) {
     StepperManager::timerISR();
 }
 
@@ -60,42 +64,52 @@ void StepperManager::init() {
 #endif
 
     // ========================================================================
-    // Configure Timer3 for 10kHz interrupt (100µs period)
+    // Configure Timer3: Fast PWM mode 14 (ICR3 as TOP) — 10 kHz OVF
+    // ========================================================================
+    //
+    //   f_cpu = 16 MHz, prescaler = 8  →  f_timer = 2 MHz
+    //   ICR3  = (2 000 000 / STEPPER_TIMER_FREQ_HZ) - 1 = 199  →  10 kHz OVF
+    //
+    //   Fast PWM mode 14: WGM33:30 = 1110
+    //     TCCR3A: WGM31=1
+    //     TCCR3B: WGM33=1, WGM32=1, CS31=1 (prescaler 8)
+    //
+    //   ICR3 replaces OCR3A as the TOP register (same numeric value: 199).
+    //   This frees OCR3A for independent hardware PWM on OC3A (pin 5):
+    //     Rev A — OC3A drives M1_EN (motor PWM)
+    //     Rev B — OC3A drives LED_RED
+    //
+    //   TIMSK3: TOIE3 (OVF interrupt) instead of OCIE3A (compare-A interrupt).
     // ========================================================================
 
-    // Disable interrupts during configuration
     noInterrupts();
 
-    // Reset Timer3 control registers
-    TCCR3A = 0;
-    TCCR3B = 0;
-    TCNT3 = 0;
+    TCCR3A = (1 << WGM31);
+    TCCR3B = (1 << WGM33) | (1 << WGM32) | (1 << CS31);
+    ICR3   = (uint16_t)((F_CPU / (8UL * STEPPER_TIMER_FREQ_HZ)) - 1);   // 199
+    TCNT3  = 0;
 
-    // Calculate OCR3A for desired frequency:
-    // OCR = (F_CPU / (prescaler * freq)) - 1
-    // For 10kHz with prescaler=8: OCR = (16000000 / (8 * 10000)) - 1 = 199
-    OCR3A = (F_CPU / (8UL * STEPPER_TIMER_FREQ_HZ)) - 1;
+    // Connect OC3A output pin based on revision (set in pins.h)
+#if defined(PIN_M1_EN_IS_OC3A)
+    // Rev A: OC3A (pin 5) → M1_EN, non-inverting fast PWM
+    TCCR3A |= (1 << COM3A1);
+    OCR3A   = 0;   // Motor off at startup
+#elif defined(PIN_LED_RED_IS_OC3A)
+    // Rev B: OC3A (pin 5) → LED_RED, non-inverting fast PWM
+    TCCR3A |= (1 << COM3A1);
+    OCR3A   = 0;   // LED off at startup
+#endif
 
-    // Configure for CTC mode (Clear Timer on Compare Match)
-    // WGM32 = 1 (CTC mode with OCR3A as TOP)
-    TCCR3B |= (1 << WGM32);
+    TIMSK3 = (1 << TOIE3);   // OVF interrupt (was OCIE3A in CTC mode)
 
-    // Set prescaler to 8
-    // CS31 = 1 (prescaler = 8)
-    TCCR3B |= (1 << CS31);
-
-    // Enable Timer3 Compare Match A interrupt
-    TIMSK3 |= (1 << OCIE3A);
-
-    // Re-enable interrupts
     interrupts();
 
     initialized_ = true;
 
 #ifdef DEBUG_STEPPER
-    DEBUG_SERIAL.println(F("[StepperManager] Timer3 initialized @ 10kHz"));
-    DEBUG_SERIAL.print(F("  - OCR3A = "));
-    DEBUG_SERIAL.println(OCR3A);
+    DEBUG_SERIAL.println(F("[StepperManager] Timer3 @ 10kHz (Fast PWM mode 14)"));
+    DEBUG_SERIAL.print(F("  - ICR3 = "));
+    DEBUG_SERIAL.println(ICR3);
 #endif
 }
 
@@ -115,7 +129,7 @@ StepperMotor* StepperManager::getStepper(uint8_t stepperId) {
 // ============================================================================
 
 void StepperManager::timerISR() {
-#ifdef DEBUG_PINS_ENABLED
+#if DEBUG_PINS_ENABLED
     digitalWrite(DEBUG_PIN_STEPPER_ISR, HIGH);
 #endif
 
@@ -124,7 +138,7 @@ void StepperManager::timerISR() {
         steppers_[i].timerCallback();
     }
 
-#ifdef DEBUG_PINS_ENABLED
+#if DEBUG_PINS_ENABLED
     digitalWrite(DEBUG_PIN_STEPPER_ISR, LOW);
 #endif
 }

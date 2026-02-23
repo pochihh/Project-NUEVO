@@ -160,30 +160,25 @@ Motors 3 and 4 use Pin Change Interrupts with shared vectors:
 - This is acceptable for manipulator motors (lower max speed than wheels)
 - See `firmware/technical_notes.md` for PCINT ISR implementation pattern ✅
 
-### ⚠️ Issue 4: Pin 5 PWM Timer Conflict - ✅ RESOLVED
+### ✅ Issue 4: Pin 5 PWM Timer Conflict — FULLY RESOLVED in v0.8.0
 
 **LED_RED** moved from pin 11 (Timer 1) to pin 5 (Timer 3)
 
-**CONFIRMED CONFLICT:** ❌ Pin 5 CANNOT use PWM while Timer 3 generates stepper pulses
+**Root Cause (Pre v0.8.0):** Timer 3 was in CTC mode — OCR3A held the TOP value, making it
+impossible to simultaneously drive hardware PWM on OC3A and generate stepper ISR ticks.
 
-**Technical Details:**
-- Pin 5 is controlled by Timer 3 (OC3A)
-- Timer 3 is configured in CTC mode for 10kHz stepper pulse generation (see `StepperManager.cpp`)
-- A timer can only operate in ONE mode at a time (CTC for steppers OR PWM for LED)
-- Calling `analogWrite(5, brightness)` would reconfigure Timer 3 and break stepper pulses
+**Resolution (v0.8.0):** Timer 3 reconfigured to **Fast PWM mode 14 (ICR3 as TOP)**.
+- ICR3 replaces OCR3A as the TOP register (same numeric value: 199 → 10 kHz OVF)
+- OC3A is now **free** for independent hardware PWM — full LED_RED breathing restored
+- OVF interrupt fires at identical 10 kHz rate via TIMER3_OVF_vect (was TIMER3_COMPA_vect)
+- All PWM writes use `OCR3A` directly (never `analogWrite()`) to avoid timer reconfiguration
 
-**Resolution:** ✅ Disable PWM/breathing for LED_RED (ON/OFF mode only)
-- LED_RED is a status indicator (error/low battery) - brightness control not essential
-- Simple ON/OFF is sufficient for its purpose
-- Other LEDs (pins 44-46) retain full PWM capability
-- Stepper functionality preserved (higher priority)
+**Implementation files:**
+- `StepperManager.cpp`: Fast PWM mode 14 init, conditional OC3A connection
+- `pins.h`: `PIN_LED_RED_IS_OC3A`, `LED_RED_OCR`/`LED_RED_ICR` macros
+- `UserIO.cpp`: `LED_RED_OCR = (brightness * LED_RED_ICR) / 255` for PWM + breathing
 
-**Required Code Changes:**
-1. Update `pins.h`: Change `PIN_LED_RED` from 11 to 5 with warning comment
-2. Modify `UserIO.cpp`: Add pin check to disable `analogWrite()` for PIN_LED_RED
-3. Fallback behavior: LED_BREATHE mode becomes LED_BLINK for pin 5
-
-**See:** `firmware/TIMER3_CONFLICT_ANALYSIS.md` for complete technical analysis
+**See:** `firmware/notes/TIMER3_CONFLICT_ANALYSIS.md` for full historical analysis
 
 ### ⚠️ Issue 5: PCB Trace Routing Complexity
 

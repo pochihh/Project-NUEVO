@@ -1,4 +1,5 @@
-# MAE 162 Educational Robotics Platform
+# Project NUEVO
+![](/assets/NUEVO.png)
 
 Lab project material for the MAE 162 robotics course (Winter/Spring 2026).
 
@@ -27,10 +28,25 @@ A modular two-wheeled mobile robot platform designed for hands-on robotics educa
 ```
 ├── firmware/      Arduino firmware (.ino files)
 ├── ros2_ws/       ROS2 workspace
-├── pcb/           PCB design files (schematics, layouts, BOM)
+├── TLV protocol/  TLV type definitions used for both Arduino and ROS2 communication
+├── NUEVO board/   PCB design files (schematics, layouts, BOM)
 ├── mechanical/    CAD files for chassis and manipulators
-└── docs/          Assembly instructions and course materials
+├── NUEVO UI/      User interface code (if applicable)
+├── notes/         Notes and documentation for development
+└── docs/          Documentation and reports
 ```
+
+
+
+
+## Key Documents
+
+| Document | Purpose |
+|----------|---------|
+| [DESIGN_GUIDELINES.md](DESIGN_GUIDELINES.md) | Cross-project conventions: numbering, naming, units, coordinate system, workflow |
+| [COMMUNICATION_PROTOCOL.md](COMMUNICATION_PROTOCOL.md) | TLV v2.0 wire protocol specification |
+| [firmware/README.md](firmware/README.md) | Arduino firmware architecture, build instructions |
+| [NUEVO board/SPECIFICATIONS.md](NUEVO%20board/SPECIFICATIONS.md) | PCB hardware specifications |
 
 ## Technologies
 
@@ -40,6 +56,3 @@ A modular two-wheeled mobile robot platform designed for hands-on robotics educa
 - **Sensors**: Camera, GPS, encoders
 - **Hardware**: Custom PCB, stepper/servo motors
 
-## Getting Started
-
-Refer to `CLAUDE.md` for detailed development guidance and architecture notes.

@@ -1,0 +1,24 @@
+[project]
+name = "nuevo-bridge"
+version = "0.1.0"
+description = "NUEVO UI backend - serial bridge between Arduino and web frontend"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.109.0,<1.0",
+    "uvicorn[standard]>=0.27.0,<1.0",
+    "pyserial>=3.5,<4.0",
+    "websockets>=12.0,<13.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "httpx",  # For testing FastAPI
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nuevo_bridge*", "tlvcodec*"]

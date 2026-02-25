@@ -1,0 +1,65 @@
+# ──────────────────────────────────────────────
+# Frontend (Vite / React / TypeScript / Node)
+# ──────────────────────────────────────────────
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/*.local
+
+# ──────────────────────────────────────────────
+# Backend (Python / FastAPI / uv / pip)
+# ──────────────────────────────────────────────
+
+# Virtual environments
+backend/.venv/
+backend/venv/
+backend/env/
+
+# Byte-compiled / optimised / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+backend/*.egg-info/
+backend/dist/
+backend/build/
+backend/.eggs/
+*.egg
+
+# uv / pip local caches
+backend/.uv/
+backend/uv.lock
+
+# ──────────────────────────────────────────────
+# Static build output (frontend built into backend)
+# ──────────────────────────────────────────────
+backend/static/*.js
+backend/static/*.css
+backend/static/*.html
+backend/static/assets/
+# Keep the .gitkeep sentinel
+!backend/static/.gitkeep
+
+# ──────────────────────────────────────────────
+# Environment / secrets
+# ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ──────────────────────────────────────────────
+# OS / editor artefacts
+# ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
+
+# ──────────────────────────────────────────────
+# Local reference
+# ──────────────────────────────────────────────
+frontend_back/

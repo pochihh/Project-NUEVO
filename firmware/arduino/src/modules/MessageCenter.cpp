@@ -1,6 +1,16 @@
 /**
  * @file MessageCenter.cpp
  * @brief Implementation of central message routing (TLV protocol v2.0)
+ *
+ * Telemetry batching:
+ *   sendTelemetry() calls beginFrame() once, appends each due TLV with
+ *   addTlvPacket(), then calls sendFrame() — transmitting a single
+ *   multi-TLV frame per 100 Hz tick instead of N separate frames.
+ *
+ * Incoming:
+ *   processIncoming() feeds raw bytes into the TLV decoder; decodeCallback()
+ *   is invoked synchronously for each complete frame and routes every TLV in
+ *   that frame to routeMessage().
  */
 
 #include "MessageCenter.h"
@@ -21,7 +31,11 @@ extern StepperMotor steppers[NUM_STEPPERS];
 // STATIC MEMBER INITIALIZATION
 // ============================================================================
 
-UARTDriver  MessageCenter::uart_;
+struct TlvEncodeDescriptor  MessageCenter::encodeDesc_;
+struct TlvDecodeDescriptor  MessageCenter::decodeDesc_;
+uint8_t                     MessageCenter::txBuffer_[1024];
+uint8_t                     MessageCenter::rxBuffer_[512];
+
 uint32_t    MessageCenter::lastHeartbeatMs_   = 0;
 uint32_t    MessageCenter::lastCmdMs_         = 0;
 bool        MessageCenter::heartbeatValid_    = false;
@@ -53,7 +67,8 @@ uint32_t    MessageCenter::lastIOStatusSendMs_    = 0;
 uint32_t    MessageCenter::lastStatusSendMs_      = 0;
 uint32_t    MessageCenter::lastMagCalSendMs_      = 0;
 
-bool        MessageCenter::initialized_ = false;
+bool        MessageCenter::pendingMagCal_ = false;
+bool        MessageCenter::initialized_  = false;
 
 // ============================================================================
 // INITIALIZATION
@@ -62,17 +77,53 @@ bool        MessageCenter::initialized_ = false;
 void MessageCenter::init() {
     if (initialized_) return;
 
-    uart_.init();
+    // Open Serial2 for RPi communication
+    RPI_SERIAL.begin(RPI_BAUD_RATE);
+
+    // Initialise TX encoder
+    initEncodeDescriptor(&encodeDesc_, sizeof(txBuffer_), DEVICE_ID, ENABLE_CRC_CHECK);
+    encodeDesc_.buffer = txBuffer_;
+
+    // Initialise RX decoder with callback
+    initDecodeDescriptor(&decodeDesc_, sizeof(rxBuffer_), ENABLE_CRC_CHECK, decodeCallback);
+    decodeDesc_.buffer = rxBuffer_;
 
     lastHeartbeatMs_ = millis();
     lastCmdMs_       = millis();
     heartbeatValid_  = false;
+    pendingMagCal_   = false;
     SystemManager::requestTransition(SYS_STATE_IDLE);
 
     initialized_ = true;
 
 #ifdef DEBUG_TLV_PACKETS
-    DEBUG_SERIAL.println(F("[MessageCenter] Initialized (v2.0)"));
+    DEBUG_SERIAL.println(F("[MessageCenter] Initialized (v2.0, batched TX)"));
+#endif
+}
+
+// ============================================================================
+// FRAME HELPERS
+// ============================================================================
+
+void MessageCenter::beginFrame() {
+    resetDescriptor(&encodeDesc_);
+}
+
+void MessageCenter::sendFrame() {
+    // Only send if at least one TLV was appended
+    if (encodeDesc_.frameHeader.numTlvs == 0) return;
+
+    int n = wrapupBuffer(&encodeDesc_);
+    if (n > 0) {
+        RPI_SERIAL.write(txBuffer_, (size_t)n);
+    }
+
+#ifdef DEBUG_TLV_PACKETS
+    DEBUG_SERIAL.print(F("[TX] Frame: "));
+    DEBUG_SERIAL.print(encodeDesc_.frameHeader.numTlvs);
+    DEBUG_SERIAL.print(F(" TLVs, "));
+    DEBUG_SERIAL.print(n);
+    DEBUG_SERIAL.println(F(" bytes"));
 #endif
 }
 
@@ -81,12 +132,12 @@ void MessageCenter::init() {
 // ============================================================================
 
 void MessageCenter::processIncoming() {
-    uint32_t msgType;
-    uint8_t  payload[MAX_TLV_PAYLOAD_SIZE];
-    uint32_t length;
-
-    while (uart_.receive(&msgType, payload, &length)) {
-        routeMessage(msgType, payload, length);
+    // Feed all available bytes into the decoder.
+    // decodeCallback() fires synchronously for each complete frame and
+    // routes every TLV in that frame to routeMessage().
+    while (RPI_SERIAL.available()) {
+        uint8_t byte = (uint8_t)RPI_SERIAL.read();
+        decode(&decodeDesc_, &byte, 1);
     }
 
     checkHeartbeatTimeout();
@@ -99,6 +150,9 @@ void MessageCenter::sendTelemetry() {
     bool running         = (state == SYS_STATE_RUNNING);
     bool runningOrError  = (state == SYS_STATE_RUNNING ||
                             state == SYS_STATE_ERROR);
+
+    // Open a new frame; all send*() calls below append TLVs to it.
+    beginFrame();
 
     // ---- 100 Hz telemetry (RUNNING only) ----
     if (running) {
@@ -155,6 +209,15 @@ void MessageCenter::sendTelemetry() {
             sendMagCalStatus();
         }
     }
+
+    // ---- Queued immediate mag cal response (STOP / SAVE / APPLY / CLEAR) ----
+    if (pendingMagCal_) {
+        pendingMagCal_ = false;
+        sendMagCalStatus();
+    }
+
+    // Transmit the completed frame (no-ops if nothing was appended)
+    sendFrame();
 }
 
 // ============================================================================
@@ -173,6 +236,47 @@ void MessageCenter::checkHeartbeatTimeout() {
     // Only mark heartbeat invalid — SafetyManager::check() responds on next 100 Hz tick
     if (getTimeSinceHeartbeat() > (uint32_t)heartbeatTimeoutMs_) {
         heartbeatValid_ = false;
+    }
+}
+
+// ============================================================================
+// DECODE CALLBACK
+// ============================================================================
+
+void MessageCenter::decodeCallback(enum DecodeErrorCode* error,
+                                   const struct FrameHeader* frameHeader,
+                                   struct TlvHeader* tlvHeaders,
+                                   uint8_t** tlvData)
+{
+    if (*error != NoError) {
+        uartRxErrors_++;
+#ifdef DEBUG_TLV_PACKETS
+        DEBUG_SERIAL.print(F("[RX] Decode error: "));
+        DEBUG_SERIAL.println(*error);
+#endif
+        return;
+    }
+
+    // Route every TLV in the frame — supports multi-TLV incoming frames
+    for (uint32_t i = 0; i < frameHeader->numTlvs; i++) {
+        uint32_t length = tlvHeaders[i].tlvLen;
+        if (length > MAX_TLV_PAYLOAD_SIZE) {
+            uartRxErrors_++;
+#ifdef DEBUG_TLV_PACKETS
+            DEBUG_SERIAL.print(F("[RX] Oversized payload, type="));
+            DEBUG_SERIAL.println(tlvHeaders[i].tlvType);
+#endif
+            continue;
+        }
+
+        routeMessage(tlvHeaders[i].tlvType, tlvData[i], length);
+
+#ifdef DEBUG_TLV_PACKETS
+        DEBUG_SERIAL.print(F("[RX] Type: "));
+        DEBUG_SERIAL.print(tlvHeaders[i].tlvType);
+        DEBUG_SERIAL.print(F(", Len: "));
+        DEBUG_SERIAL.println(length);
+#endif
     }
 }
 
@@ -552,23 +656,23 @@ void MessageCenter::handleMagCalCmd(const PayloadMagCalCmd* payload) {
 
         case MAG_CAL_STOP:
             SensorManager::cancelMagCalibration();
-            sendMagCalStatus();  // One final status
+            pendingMagCal_ = true;  // Queue final status for next telemetry frame
             break;
 
         case MAG_CAL_SAVE:
             SensorManager::saveMagCalibration();
-            sendMagCalStatus();
+            pendingMagCal_ = true;
             break;
 
         case MAG_CAL_APPLY:
             SensorManager::applyMagCalibration(
                 payload->offsetX, payload->offsetY, payload->offsetZ);
-            sendMagCalStatus();
+            pendingMagCal_ = true;
             break;
 
         case MAG_CAL_CLEAR:
             SensorManager::clearMagCalibration();
-            sendMagCalStatus();
+            pendingMagCal_ = true;
             break;
 
         default:
@@ -577,8 +681,10 @@ void MessageCenter::handleMagCalCmd(const PayloadMagCalCmd* payload) {
 }
 
 // ============================================================================
-// TELEMETRY SENDERS
+// TELEMETRY APPENDERS
 // ============================================================================
+// Each function appends one TLV to the current frame via addTlvPacket().
+// Must be called after beginFrame() and before sendFrame().
 
 void MessageCenter::sendDCStatusAll() {
     PayloadDCStatusAll payload;
@@ -601,7 +707,7 @@ void MessageCenter::sendDCStatusAll() {
         s.velKd      = dcMotors[i].getVelKd();
     }
 
-    uart_.send(DC_STATUS_ALL, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, DC_STATUS_ALL, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendStepStatusAll() {
@@ -620,7 +726,7 @@ void MessageCenter::sendStepStatusAll() {
         s.acceleration  = steppers[i].getAcceleration();
     }
 
-    uart_.send(STEP_STATUS_ALL, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, STEP_STATUS_ALL, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendServoStatusAll() {
@@ -638,7 +744,7 @@ void MessageCenter::sendServoStatusAll() {
         }
     }
 
-    uart_.send(SERVO_STATUS_ALL, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SERVO_STATUS_ALL, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendSensorIMU() {
@@ -665,7 +771,7 @@ void MessageCenter::sendSensorIMU() {
     payload.reserved      = 0;
     payload.timestamp     = micros();
 
-    uart_.send(SENSOR_IMU, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SENSOR_IMU, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendSensorKinematics() {
@@ -700,7 +806,7 @@ void MessageCenter::sendSensorKinematics() {
 
     payload.timestamp = micros();
 
-    uart_.send(SENSOR_KINEMATICS, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SENSOR_KINEMATICS, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendVoltageData() {
@@ -711,7 +817,7 @@ void MessageCenter::sendVoltageData() {
     payload.servoRailMv = (uint16_t)(SensorManager::getServoVoltage()  * 1000.0f);
     payload.reserved   = 0;
 
-    uart_.send(SENSOR_VOLTAGE, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SENSOR_VOLTAGE, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendIOStatus() {
@@ -731,7 +837,7 @@ void MessageCenter::sendIOStatus() {
     uint8_t sendLen = 10 + (uint8_t)(neoPixelCount_ * 3);
     if (sendLen > sizeof(buf)) sendLen = sizeof(buf);
 
-    uart_.send(IO_STATUS, buf, sendLen);
+    addTlvPacket(&encodeDesc_, IO_STATUS, sendLen, buf);
 }
 
 void MessageCenter::sendSystemStatus() {
@@ -773,7 +879,7 @@ void MessageCenter::sendSystemStatus() {
     // 0xFF = no home limit GPIO configured for this stepper
     memset(payload.stepperHomeLimitGpio, 0xFF, sizeof(payload.stepperHomeLimitGpio));
 
-    uart_.send(SYS_STATUS, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SYS_STATUS, sizeof(payload), &payload);
 }
 
 void MessageCenter::sendMagCalStatus() {
@@ -795,7 +901,7 @@ void MessageCenter::sendMagCalStatus() {
     payload.savedToEeprom = cal.savedToEeprom ? 1 : 0;
     memset(payload.reserved2, 0, sizeof(payload.reserved2));
 
-    uart_.send(SENSOR_MAG_CAL_STATUS, &payload, sizeof(payload));
+    addTlvPacket(&encodeDesc_, SENSOR_MAG_CAL_STATUS, sizeof(payload), &payload);
 }
 
 // ============================================================================

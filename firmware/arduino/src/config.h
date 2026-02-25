@@ -63,10 +63,10 @@
 #define ENCODER_4X              4       // 4x counting (both phases)
 
 // Per-motor encoder mode (use ENCODER_2X or ENCODER_4X)
-#define ENCODER_1_MODE          ENCODER_2X
-#define ENCODER_2_MODE          ENCODER_2X
-#define ENCODER_3_MODE          ENCODER_2X
-#define ENCODER_4_MODE          ENCODER_2X
+#define ENCODER_1_MODE          ENCODER_4X
+#define ENCODER_2_MODE          ENCODER_4X
+#define ENCODER_3_MODE          ENCODER_4X
+#define ENCODER_4_MODE          ENCODER_4X
 
 // Encoder direction inversion (polarity correction)
 // Set to 1 to invert encoder count direction (flips positive/negative)

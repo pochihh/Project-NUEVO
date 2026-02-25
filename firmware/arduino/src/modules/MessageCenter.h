@@ -12,6 +12,12 @@
  *   RPi → UART → MessageCenter → Parse TLV → Route to module
  *   Module → Generate TLV → MessageCenter → UART → RPi
  *
+ * Batched telemetry:
+ *   sendTelemetry() opens a single frame, conditionally appends each TLV
+ *   based on millis-gated intervals, then transmits the whole frame in one
+ *   Serial.write() call.  This cuts per-frame overhead (header + CRC) from
+ *   N copies down to one and reduces ISR TX-poll time.
+ *
  * Safety:
  * - Liveness timeout: heartbeatValid_ goes false; SafetyManager responds on next 100 Hz check
  * - State machine now owned by SystemManager; MessageCenter routes transitions via requestTransition()
@@ -29,10 +35,13 @@
 
 #include <Arduino.h>
 #include <stdint.h>
-#include "../drivers/UARTDriver.h"
+#include "../lib/tlvcodec.h"
 #include "../messages/TLV_TypeDefs.h"
 #include "../messages/TLV_Payloads.h"
 #include "../config.h"
+
+// Maximum TLV payload size we will accept from the RPi
+#define MAX_TLV_PAYLOAD_SIZE 256
 
 // ============================================================================
 // MESSAGE CENTER CLASS (Static)
@@ -44,7 +53,7 @@
  * Static class providing:
  * - TLV v2.0 message parsing and routing
  * - Firmware state machine management
- * - Telemetry generation and transmission
+ * - Batched telemetry generation and transmission
  * - Liveness monitoring and safety timeout
  */
 class MessageCenter {
@@ -52,7 +61,7 @@ public:
     /**
      * @brief Initialize message center
      *
-     * Initializes UART driver and message buffers.
+     * Opens Serial2 at RPI_BAUD_RATE and initialises the TLV codec.
      * Sets firmware state to SYS_STATE_IDLE.
      * Must be called once in setup().
      */
@@ -65,8 +74,9 @@ public:
     /**
      * @brief Process incoming messages from UART
      *
-     * Reads available bytes from UART, parses TLV messages,
-     * and routes commands to appropriate modules.
+     * Drains all available bytes from RPI_SERIAL into the TLV decoder.
+     * The decoder fires decodeCallback() for each complete frame, which
+     * routes every TLV in the frame to the appropriate handler.
      * Should be called from scheduler at 100Hz.
      */
     static void processIncoming();
@@ -74,7 +84,10 @@ public:
     /**
      * @brief Send telemetry data to RPi
      *
-     * Sends periodic telemetry based on current firmware state:
+     * Opens a single TLV frame, conditionally appends each message type
+     * based on its millis interval, then transmits the frame in one write.
+     *
+     * Rates:
      * - DC_STATUS_ALL      (100 Hz, RUNNING)
      * - STEP_STATUS_ALL    (100 Hz, RUNNING)
      * - SERVO_STATUS_ALL   ( 50 Hz, RUNNING)
@@ -83,9 +96,9 @@ public:
      * - IO_STATUS          (100 Hz, RUNNING)
      * - SENSOR_VOLTAGE     ( 10 Hz, RUNNING or ERROR)
      * - SYS_STATUS         (  1 Hz IDLE/ESTOP, 10 Hz RUNNING/ERROR)
-     * - SENSOR_MAG_CAL_STATUS (10 Hz, while calibrating)
+     * - SENSOR_MAG_CAL_STATUS (10 Hz while sampling; immediately on cmd response)
      *
-     * Should be called from scheduler at configured rate.
+     * Should be called from scheduler at 100Hz.
      */
     static void sendTelemetry();
 
@@ -118,8 +131,11 @@ public:
     static void disableAllActuators();
 
 private:
-    // UART driver instance
-    static UARTDriver uart_;
+    // ---- TLV codec (owned directly, no UARTDriver wrapper) ----
+    static struct TlvEncodeDescriptor encodeDesc_;
+    static struct TlvDecodeDescriptor decodeDesc_;
+    static uint8_t txBuffer_[1024];   // TX frame accumulation buffer
+    static uint8_t rxBuffer_[512];    // RX decode buffer
 
     // ---- Liveness tracking ----
     static uint32_t lastHeartbeatMs_;   // millis() of last received TLV
@@ -161,8 +177,41 @@ private:
     static uint32_t lastStatusSendMs_;
     static uint32_t lastMagCalSendMs_;
 
+    // ---- Queued async response ----
+    // Set by handleMagCalCmd on STOP/SAVE/APPLY/CLEAR so the response is
+    // included in the very next sendTelemetry() frame rather than sent as a
+    // standalone frame from within the command handler.
+    static bool     pendingMagCal_;
+
     // ---- Initialization flag ----
     static bool initialized_;
+
+    // ========================================================================
+    // FRAME HELPERS
+    // ========================================================================
+
+    /**
+     * @brief Reset the TX encoder for a new outgoing frame
+     */
+    static void beginFrame();
+
+    /**
+     * @brief Finalise and transmit the accumulated frame over RPI_SERIAL
+     *
+     * No-ops if no TLVs have been appended since the last beginFrame().
+     */
+    static void sendFrame();
+
+    /**
+     * @brief TLV decode callback — called synchronously by decode() for each complete frame
+     *
+     * Loops over every TLV in the frame and routes each to routeMessage().
+     * Incoming multi-TLV frames are therefore handled correctly.
+     */
+    static void decodeCallback(enum DecodeErrorCode* error,
+                               const struct FrameHeader* frameHeader,
+                               struct TlvHeader* tlvHeaders,
+                               uint8_t** tlvData);
 
     // ========================================================================
     // MESSAGE ROUTING
@@ -215,34 +264,36 @@ private:
     static void handleMagCalCmd(const PayloadMagCalCmd* payload);
 
     // ========================================================================
-    // TELEMETRY SENDERS
+    // TELEMETRY APPENDERS
     // ========================================================================
+    // Each method appends one TLV to the current frame buffer.
+    // Must be called between beginFrame() and sendFrame().
 
-    /** @brief Send all DC motor status (184 bytes) */
+    /** @brief Append all DC motor status (184 bytes payload) */
     static void sendDCStatusAll();
 
-    /** @brief Send all stepper motor status (96 bytes) */
+    /** @brief Append all stepper motor status (96 bytes payload) */
     static void sendStepStatusAll();
 
-    /** @brief Send servo status for all 16 channels (36 bytes) */
+    /** @brief Append servo status for all 16 channels (36 bytes payload) */
     static void sendServoStatusAll();
 
-    /** @brief Send IMU quaternion and raw sensor data (52 bytes) */
+    /** @brief Append IMU quaternion and raw sensor data (52 bytes payload) */
     static void sendSensorIMU();
 
-    /** @brief Send wheel odometry kinematics (28 bytes) */
+    /** @brief Append wheel odometry kinematics (28 bytes payload) */
     static void sendSensorKinematics();
 
-    /** @brief Send battery and rail voltages (8 bytes) */
+    /** @brief Append battery and rail voltages (8 bytes payload) */
     static void sendVoltageData();
 
-    /** @brief Send button/limit states and NeoPixel RGB (variable) */
+    /** @brief Append button/limit states and NeoPixel RGB (variable payload) */
     static void sendIOStatus();
 
-    /** @brief Send system state, version, and diagnostics (48 bytes) */
+    /** @brief Append system state, version, and diagnostics (48 bytes payload) */
     static void sendSystemStatus();
 
-    /** @brief Send magnetometer calibration progress (44 bytes) */
+    /** @brief Append magnetometer calibration progress (44 bytes payload) */
     static void sendMagCalStatus();
 
     // ========================================================================

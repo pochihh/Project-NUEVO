@@ -60,6 +60,12 @@ Thumbs.db
 *.code-workspace
 
 # ──────────────────────────────────────────────
+# Auth — user database (auto-created on first boot from defaults in auth.py)
+# students: run "pip install -e ." then start the server — users.json is created automatically
+# ──────────────────────────────────────────────
+backend/users.json
+
+# ──────────────────────────────────────────────
 # Local reference
 # ──────────────────────────────────────────────
 frontend_back/

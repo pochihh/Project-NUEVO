@@ -2,9 +2,11 @@
  * useWebSocket Hook
  * Manages WebSocket connection with auto-reconnect.
  * Dispatches incoming messages to the robot store.
+ * Appends the JWT token as ?token= query param (required by the backend).
  */
 import { useEffect, useRef, useCallback } from 'react'
 import { useRobotStore } from '../store/robotStore'
+import { useAuthStore } from '../store/authStore'
 import type { WSMessage, WSCommand } from '../lib/wsProtocol'
 import { registerSend } from '../lib/wsSend'
 
@@ -13,18 +15,23 @@ export function useWebSocket() {
   const reconnectTimerRef = useRef<number | null>(null)
   const isConnectingRef = useRef(false)
   const dispatch = useRobotStore((s) => s.dispatch)
+  const token = useAuthStore((s) => s.token)
 
   const connect = useCallback(() => {
     if (isConnectingRef.current) return
-    if (wsRef.current?.readyState === WebSocket.OPEN ||
-        wsRef.current?.readyState === WebSocket.CONNECTING) return
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    )
+      return
+    if (!token) return  // not authenticated — don't attempt connection
 
     isConnectingRef.current = true
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws`
+    const wsUrl = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
 
-    console.log('[WS] Connecting to', wsUrl)
+    console.log('[WS] Connecting to', wsUrl.split('?')[0])
     const socket = new WebSocket(wsUrl)
 
     socket.onopen = () => {
@@ -48,7 +55,8 @@ export function useWebSocket() {
       wsRef.current = null
       isConnectingRef.current = false
 
-      if (event.code !== 1000 && !reconnectTimerRef.current) {
+      // code 4001 = auth rejected; don't retry
+      if (event.code !== 1000 && event.code !== 4001 && !reconnectTimerRef.current) {
         reconnectTimerRef.current = window.setTimeout(() => {
           reconnectTimerRef.current = null
           connect()
@@ -61,7 +69,7 @@ export function useWebSocket() {
     }
 
     wsRef.current = socket
-  }, [dispatch])
+  }, [dispatch, token])
 
   useEffect(() => {
     connect()

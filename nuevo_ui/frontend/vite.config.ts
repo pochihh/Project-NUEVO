@@ -26,6 +26,10 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/auth': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })

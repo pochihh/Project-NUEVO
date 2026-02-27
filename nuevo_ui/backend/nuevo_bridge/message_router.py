@@ -451,14 +451,15 @@ class MessageRouter:
     def __init__(self, ws_manager):
         self.ws_manager = ws_manager
 
-    def handle_incoming(self, tlv_type: int, tlv_data: bytes):
+    def decode_incoming(self, tlv_type: int, tlv_data: bytes) -> Optional[dict]:
         """
-        Handle incoming TLV message from Arduino.
-        Decodes to JSON dict and broadcasts over WebSocket.
+        Decode a TLV to a JSON-ready message dict (synchronous, no side effects).
+        Returns None on unknown type, decode error, or size mismatch.
+        Used by SerialManager to accumulate a batch before a single broadcast task.
         """
         if tlv_type not in INCOMING_REGISTRY:
             print(f"[Router] Unknown TLV type: {tlv_type:#06x}")
-            return
+            return None
 
         topic, decode_fn = INCOMING_REGISTRY[tlv_type]
 
@@ -466,19 +467,33 @@ class MessageRouter:
             data_dict = decode_fn(tlv_data)
         except Exception as e:
             print(f"[Router] Decode error for {topic}: {e}")
-            return
+            return None
 
         if data_dict is None:
             print(f"[Router] Size mismatch for {topic}: got {len(tlv_data)} bytes")
+            return None
+
+        return {"topic": topic, "data": data_dict, "ts": time.time()}
+
+    def handle_incoming(self, tlv_type: int, tlv_data: bytes):
+        """
+        Handle incoming TLV message from Arduino.
+        Decodes to JSON dict and broadcasts over WebSocket.
+        Used by MockSerialManager which generates one message at a time.
+        For batched reads (real Arduino), use decode_incoming() + flush_to_ws().
+        """
+        message = self.decode_incoming(tlv_type, tlv_data)
+        if message is None:
             return
 
-        message = {
-            "topic": topic,
-            "data":  data_dict,
-            "ts":    time.time(),
-        }
+        # Skip task creation when no clients are connected (avoids ~100+ tasks/sec overhead)
+        if self.ws_manager.connections:
+            asyncio.create_task(self.ws_manager.broadcast(message))
 
-        asyncio.create_task(self.ws_manager.broadcast(message))
+    async def flush_to_ws(self, messages: list):
+        """Broadcast a batch of pre-decoded message dicts. Called as a single task."""
+        for msg in messages:
+            await self.ws_manager.broadcast(msg)
 
     def handle_outgoing(self, cmd: str, data: Dict[str, Any]) -> Optional[Tuple[int, ctypes.Structure]]:
         """

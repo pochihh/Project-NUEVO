@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>nuevo_bridge</name>
+  <version>0.1.0</version>
+  <description>
+    NUEVO Bridge — bidirectional serial bridge between the Arduino and the
+    Raspberry Pi.  Serves a WebSocket UI for testing and optionally publishes
+    all telemetry as ROS2 topics while subscribing to command topics.
+  </description>
+
+  <maintainer email="mae162@ucdavis.edu">MAE 162 Staff</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- Python runtime dependencies -->
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>builtin_interfaces</depend>
+
+  <!-- Custom messages built alongside this package -->
+  <depend>nuevo_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

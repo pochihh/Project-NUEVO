@@ -2,10 +2,13 @@
 Serial Manager — Serial Port Owner + Mock Simulator
 
 SerialManager: manages UART to Arduino.
-  - Auto-reconnect on disconnect
-  - Sends SYS_HEARTBEAT every 200 ms (safety: firmware cuts motors at 500 ms timeout)
-  - Feeds received bytes to TLV decoder → message_router.handle_incoming()
-  - Provides send(tlv_type, payload) for outgoing commands
+  - Dedicated blocking reader thread: ser.read() returns the instant bytes arrive
+    (10 ms timeout allows clean shutdown check without busy-looping)
+  - asyncio event loop handles heartbeat / stats / WebSocket — never blocked by I/O
+  - threading.Lock on ser.write() so asyncio heartbeat and rclpy callbacks coexist safely
+  - Feeds received bytes to TLV decoder → message_router.decode_incoming()
+  - Flushes decoded batch to WebSocket (via asyncio.run_coroutine_threadsafe) and
+    optionally to a ROS2 node (publisher calls are thread-safe in rclpy)
 
 MockSerialManager: physics-based Arduino simulator for development.
   - Full Arduino state machine: INIT → IDLE → RUNNING / ERROR / ESTOP
@@ -24,6 +27,7 @@ import time
 import random
 import asyncio
 import ctypes
+import threading
 from typing import Optional
 
 from .config import (
@@ -57,7 +61,14 @@ from tlvcodec import Encoder, Decoder, DecodeErrorCode
 # ============================================================================
 
 class SerialManager:
-    """UART serial manager for Arduino communication."""
+    """
+    UART serial manager for Arduino communication.
+
+    Threading model:
+      - _reader_loop()  runs in a dedicated daemon thread (blocking serial reads)
+      - run()           is an asyncio coroutine (heartbeat + stats + WS)
+      - send()          is thread-safe via _write_lock (called from both)
+    """
 
     def __init__(self, message_router, ws_manager):
         self.message_router = message_router
@@ -68,6 +79,16 @@ class SerialManager:
 
         self.encoder = Encoder(deviceId=DEVICE_ID, bufferSize=4096, crc=ENABLE_CRC)
         self.decoder = Decoder(callback=self._decode_callback, crc=ENABLE_CRC)
+
+        # Protects ser.write() — called from asyncio thread (heartbeat) and
+        # rclpy spin thread (/cmd_vel callbacks) simultaneously in ROS2 mode.
+        self._write_lock = threading.Lock()
+
+        # Set by app.py when NUEVO_ROS2=1; publish_decoded() called from reader thread.
+        self._ros2_node = None
+
+        # Captured in run() so the reader thread can schedule coroutines on it.
+        self._asyncio_loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.last_heartbeat_time = 0.0
         self.last_stats_time = 0.0
@@ -83,8 +104,22 @@ class SerialManager:
         }
 
         self._running = False
+        self._pending_messages: list = []  # accumulated within one decoder.decode() call
 
-    def _try_connect(self):
+    # ------------------------------------------------------------------
+    # ROS2 integration hook
+    # ------------------------------------------------------------------
+
+    def set_ros2_node(self, node) -> None:
+        """Called from app.py after the ROS2 node is constructed."""
+        self._ros2_node = node
+
+    # ------------------------------------------------------------------
+    # Serial connection
+    # ------------------------------------------------------------------
+
+    def _try_connect(self) -> bool:
+        """Open the serial port. Returns True on success. Blocking — run in reader thread."""
         try:
             import serial
             self.ser = serial.Serial(
@@ -93,7 +128,9 @@ class SerialManager:
                 bytesize=serial.EIGHTBITS,
                 parity=serial.PARITY_NONE,
                 stopbits=serial.STOPBITS_ONE,
-                timeout=SERIAL_TIMEOUT,
+                # 10 ms read timeout: ser.read() returns when bytes arrive OR after 10 ms.
+                # This lets _reader_loop check _running without busy-looping.
+                timeout=0.01,
             )
             self.connected = True
             self.stats["connected"] = True
@@ -105,6 +142,10 @@ class SerialManager:
             print(f"[Serial] Failed to connect: {e}")
             return False
 
+    # ------------------------------------------------------------------
+    # Decoder callback — runs inside _reader_loop thread
+    # ------------------------------------------------------------------
+
     def _decode_callback(self, error_code, frame_header, tlv_list):
         if error_code != DecodeErrorCode.NoError:
             self.stats["crc_errors"] += 1
@@ -114,30 +155,110 @@ class SerialManager:
             return
 
         self.stats["rx_count"] += 1
+        # Accumulate decoded messages; flushed together after decoder.decode() returns,
+        # producing one asyncio schedule + one ROS2 publish loop per serial read batch.
         for tlv_type, tlv_len, tlv_data in tlv_list:
-            self.message_router.handle_incoming(tlv_type, tlv_data)
+            msg = self.message_router.decode_incoming(tlv_type, tlv_data)
+            if msg is not None:
+                self._pending_messages.append(msg)
 
-    def _send_heartbeat(self):
+    def _flush_pending(self) -> None:
+        """
+        Distribute accumulated messages to WebSocket and ROS2.
+        Called from the reader thread after each decoder.decode() call.
+        """
+        if not self._pending_messages:
+            return
+
+        msgs = self._pending_messages[:]
+        self._pending_messages.clear()
+
+        # → WebSocket: schedule coroutine on the asyncio event loop (thread-safe)
+        if self.ws_manager.connections and self._asyncio_loop:
+            asyncio.run_coroutine_threadsafe(
+                self.message_router.flush_to_ws(msgs),
+                self._asyncio_loop,
+            )
+
+        # → ROS2: rclpy publishers are thread-safe for concurrent publish() calls
+        if self._ros2_node is not None:
+            for msg in msgs:
+                self._ros2_node.publish_decoded(msg)
+
+    # ------------------------------------------------------------------
+    # Blocking reader thread
+    # ------------------------------------------------------------------
+
+    def _reader_loop(self) -> None:
+        """
+        Dedicated UART reader thread.
+
+        ser.read(4096) blocks until bytes arrive or 10 ms elapses — hardware-driven
+        timing with zero CPU burn while waiting. This gives <1 ms read latency
+        regardless of asyncio event loop activity.
+        """
+        print("[Serial] Reader thread started.")
+        while self._running:
+            if not self.connected:
+                if not self._try_connect():
+                    time.sleep(1.0)
+                continue
+
+            try:
+                data = self.ser.read(4096)
+                if data:
+                    self.decoder.decode(data)
+                    self._flush_pending()
+            except Exception as e:
+                print(f"[Serial] Read error: {e}")
+                self.connected = False
+                self.stats["connected"] = False
+                if self.ser:
+                    try:
+                        self.ser.close()
+                    except Exception:
+                        pass
+                    self.ser = None
+                time.sleep(1.0)
+
+        print("[Serial] Reader thread stopped.")
+
+    # ------------------------------------------------------------------
+    # Write path — thread-safe
+    # ------------------------------------------------------------------
+
+    def send(self, tlv_type: int, payload: ctypes.Structure) -> None:
+        """
+        Thread-safe TLV send. Called from:
+          - asyncio event loop (heartbeat, UI WebSocket commands)
+          - rclpy spin thread (/cmd_vel, /nuevo/step_cmd, etc.) in ROS2 mode
+        ser.write() to the OS TX buffer is sub-millisecond; lock hold time is negligible.
+        """
+        if not self.connected or not self.ser:
+            return
+        with self._write_lock:
+            try:
+                self.encoder.reset()
+                self.encoder.addPacket(tlv_type, ctypes.sizeof(payload), payload)
+                length, buffer = self.encoder.wrapupBuffer()
+                self.ser.write(buffer[:length])
+                self.stats["tx_count"] += 1
+            except Exception as e:
+                print(f"[Serial] Send error: {e}")
+                self.connected = False
+                self.stats["connected"] = False
+
+    def _send_heartbeat(self) -> None:
         p = PayloadHeartbeat()
         p.timestamp = int(time.time() * 1000) & 0xFFFFFFFF
         p.flags = 0
         self.send(SYS_HEARTBEAT, p)
 
-    def send(self, tlv_type: int, payload: ctypes.Structure):
-        if not self.connected or not self.ser:
-            return
-        try:
-            self.encoder.reset()
-            self.encoder.addPacket(tlv_type, ctypes.sizeof(payload), payload)
-            length, buffer = self.encoder.wrapupBuffer()
-            self.ser.write(buffer[:length])
-            self.stats["tx_count"] += 1
-        except Exception as e:
-            print(f"[Serial] Send error: {e}")
-            self.connected = False
-            self.stats["connected"] = False
+    # ------------------------------------------------------------------
+    # Stats broadcast
+    # ------------------------------------------------------------------
 
-    async def _broadcast_stats(self):
+    async def _broadcast_stats(self) -> None:
         await self.ws_manager.broadcast({
             "topic": "connection",
             "data": {
@@ -151,52 +272,55 @@ class SerialManager:
             "ts": time.time(),
         })
 
-    async def run(self):
+    # ------------------------------------------------------------------
+    # Asyncio entry point
+    # ------------------------------------------------------------------
+
+    async def run(self) -> None:
+        """
+        Asyncio entry point. Captures the event loop reference, starts the
+        blocking reader thread, then manages heartbeat and stats broadcasts.
+        """
+        self._asyncio_loop = asyncio.get_event_loop()
         self._running = True
-        print("[Serial] Starting serial manager...")
 
-        while self._running:
-            if not self.connected:
-                self._try_connect()
-                await asyncio.sleep(1.0)
-                continue
+        reader_thread = threading.Thread(
+            target=self._reader_loop,
+            daemon=True,
+            name="serial-reader",
+        )
+        reader_thread.start()
 
-            now = time.time()
+        print("[Serial] Manager started (reader thread is hardware-driven).")
 
-            if now - self.last_heartbeat_time >= HEARTBEAT_INTERVAL:
-                self._send_heartbeat()
-                self.last_heartbeat_time = now
+        try:
+            while self._running:
+                now = time.time()
 
-            try:
-                if self.ser.in_waiting > 0:
-                    data = await asyncio.get_event_loop().run_in_executor(
-                        None, self.ser.read, self.ser.in_waiting
-                    )
-                    self.decoder.decode(data)
-            except Exception as e:
-                print(f"[Serial] Read error: {e}")
-                self.connected = False
-                self.stats["connected"] = False
-                if self.ser:
-                    self.ser.close()
-                await asyncio.sleep(1.0)
-                continue
+                # Heartbeat: send() uses _write_lock; hold time is sub-ms
+                if self.connected and now - self.last_heartbeat_time >= HEARTBEAT_INTERVAL:
+                    self._send_heartbeat()
+                    self.last_heartbeat_time = now
 
-            if now - self.last_stats_time >= STATS_INTERVAL:
-                await self._broadcast_stats()
-                self.last_stats_time = now
+                if now - self.last_stats_time >= STATS_INTERVAL:
+                    await self._broadcast_stats()
+                    self.last_stats_time = now
 
-            await asyncio.sleep(0.01)
+                # Sleep 50 ms — heartbeat threshold is checked 4× per 200 ms window
+                await asyncio.sleep(0.05)
+        finally:
+            reader_thread.join(timeout=2.0)
 
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
+        # Send STOP before closing so Arduino disables actuators gracefully
         if self.connected:
             p = PayloadSysCmd()
-            p.command = 2   # STOP
+            p.command = 2  # SYS_CMD_STOP
             self.send(SYS_CMD, p)
         if self.ser and self.ser.is_open:
             self.ser.close()
-        print("[Serial] Stopped")
+        print("[Serial] Stopped.")
 
 
 # ============================================================================
@@ -239,15 +363,14 @@ class _DC:
 
     def __init__(self):
         self.mode         = _DC_DISABLED
-        self.position     = 0.0     # encoder ticks (float for smooth sim)
-        self.velocity     = 0.0     # ticks/s
+        self.position     = 0.0
+        self.velocity     = 0.0
         self.target_vel   = 0
         self.target_pos   = 0
         self.pwm          = 0
         self.vel_integral = 0.0
         self.fault_flags  = 0
         self.current_ma   = 0.0
-        # Default PID gains
         self.kp_vel = 2.0;  self.ki_vel = 0.5;  self.kd_vel = 0.05
         self.kp_pos = 1.5;  self.ki_pos = 0.05; self.kd_pos = 0.1
 
@@ -256,23 +379,20 @@ class _DC:
             return
 
         if self.mode == _DC_DISABLED:
-            # Coast to stop with friction
             self.velocity *= math.exp(-dt / 0.08)
             self.pwm = 0
             self.current_ma = 0.0
 
         elif self.mode == _DC_VELOCITY:
-            # First-order velocity response (tau = 150 ms) + integral windup guard
             target = float(self.target_vel)
             tau = 0.15
             alpha = 1.0 - math.exp(-dt / tau)
             self.velocity += (target - self.velocity) * alpha
-            self.velocity += random.gauss(0, 1.5)          # sensor noise
+            self.velocity += random.gauss(0, 1.5)
             self.pwm = int(_clamp(self.velocity / 10.0, -255, 255))
             self.current_ma = abs(self.velocity) * 0.28 + random.gauss(45, 8)
 
         elif self.mode == _DC_POSITION:
-            # Proportional position → velocity setpoint (simple cascade)
             pos_error = float(self.target_pos) - self.position
             vel_setpoint = _clamp(pos_error * 8.0, -900, 900)
             tau = 0.15
@@ -283,7 +403,6 @@ class _DC:
             self.current_ma = abs(self.velocity) * 0.28 + random.gauss(55, 10)
 
         elif self.mode == _DC_PWM:
-            # Velocity proportional to PWM with low-pass filter
             target_vel = float(self.pwm) * 9.0
             tau = 0.10
             alpha = 1.0 - math.exp(-dt / tau)
@@ -291,7 +410,6 @@ class _DC:
             self.velocity += random.gauss(0, 1.5)
             self.current_ma = abs(self.velocity) * 0.25 + random.gauss(40, 8)
 
-        # Integrate position
         self.position += self.velocity * dt
 
 
@@ -305,9 +423,9 @@ class _Stepper:
     def __init__(self):
         self.enabled   = False
         self.state     = _STEP_IDLE
-        self.position  = 0      # commanded step count (integer)
+        self.position  = 0
         self.target    = 0
-        self.speed     = 0.0    # current speed (steps/s)
+        self.speed     = 0.0
         self.max_speed = 1000
         self.accel     = 500
         self.limit_hit = 0
@@ -326,14 +444,10 @@ class _Stepper:
 
         direction = 1 if steps_to_go > 0 else -1
         dist = abs(steps_to_go)
-
-        # Deceleration distance: v²/(2a)
         decel_dist = (self.speed ** 2) / (2.0 * self.accel) if self.accel > 0 else 0.0
 
         if self.state == _STEP_HOMING:
-            # Homing: just move slowly toward 0
             self.speed = min(self.speed + self.accel * dt, 200.0)
-            self.state = _STEP_HOMING
         elif dist > decel_dist + 1:
             new_speed = min(self.speed + self.accel * dt, float(self.max_speed))
             self.state = _STEP_CRUISE if new_speed >= self.max_speed else _STEP_ACCEL
@@ -363,8 +477,8 @@ class _ArduinoSim:
 
     def __init__(self):
         self.state      = _SYS_INIT
-        self.uptime_us  = 0     # micros() equivalent
-        self.last_rx_ms = 9999  # ms since last TLV received (starts large)
+        self.uptime_us  = 0
+        self.last_rx_ms = 9999
         self.last_cmd_ms = 9999
         self.error_flags = 0
         self.loop_avg_us = 420
@@ -380,60 +494,47 @@ class _ArduinoSim:
         self.stepper_home_limit = [0xFF, 0xFF, 0xFF, 0xFF]
         self.attached_sensors  = 0x01   # IMU present
 
-        # DC motors (0–3)
         self.dc = [_DC() for _ in range(4)]
-
-        # Steppers (0–3)
         self.steppers = [_Stepper() for _ in range(4)]
 
-        # Servos (PCA9685, 16 channels)
         self.servo_connected  = True
         self.servo_error      = 0
         self.servo_enabled_mask = 0
         self.servo_pulses     = [1500] * 16
 
-        # IMU state
-        self.imu_yaw   = 0.0    # radians
+        self.imu_yaw   = 0.0
         self.imu_pitch = 0.0
         self.imu_roll  = 0.0
 
-        # Kinematics (differential drive)
-        self.odom_x     = 0.0   # mm
-        self.odom_y     = 0.0   # mm
-        self.odom_theta = 0.0   # rad
+        self.odom_x     = 0.0
+        self.odom_y     = 0.0
+        self.odom_theta = 0.0
 
-        # Voltage
         self.battery_mv  = float(random.randint(12400, 12800))
         self.rail5v_mv   = float(random.randint(4990, 5020))
         self.servo_rail_mv = 0.0
 
-        # IO
         self.button_mask   = 0
-        self.led_brightness = [0, 0, 0]   # LEDs 0–2
-        self.neopixel_rgb  = [0, 0, 30]   # dim blue (INIT color)
+        self.led_brightness = [0, 0, 0]
+        self.neopixel_rgb  = [0, 0, 30]
 
-        # Timing helpers
-        self._init_timer = 0.0   # time since boot (seconds)
+        self._init_timer = 0.0
         self._last_update = time.time()
 
     def receive_command(self):
-        """Called whenever any TLV is received — resets liveness counters."""
         self.last_rx_ms = 0
         self.last_cmd_ms = 0
 
     def update(self, dt: float):
-        """Advance the simulation by dt seconds."""
         self._init_timer += dt
         self.uptime_us += int(dt * 1_000_000)
 
-        # Increment liveness timers
         self.last_rx_ms  = min(self.last_rx_ms  + int(dt * 1000), 9999)
         self.last_cmd_ms = min(self.last_cmd_ms + int(dt * 1000), 9999)
 
-        # INIT → IDLE after 2 s
         if self.state == _SYS_INIT and self._init_timer >= 2.0:
             self.state = _SYS_IDLE
-            self.neopixel_rgb = [0, 20, 0]   # dim green (IDLE)
+            self.neopixel_rgb = [0, 20, 0]
 
         if self.state == _SYS_RUNNING:
             self._update_motors(dt)
@@ -441,52 +542,44 @@ class _ArduinoSim:
             self._update_kinematics(dt)
             self._update_imu(dt)
 
-        # Slow battery discharge (realistic: ~1 mV / 2 s when motors active)
         active_motors = sum(1 for m in self.dc if m.mode != _DC_DISABLED)
         drain = (0.3 + active_motors * 0.15) * dt
         self.battery_mv = max(9000.0, self.battery_mv - drain)
         self.rail5v_mv  = 5000.0 + random.gauss(5, 2)
 
-        # Random button noise (simulate occasional press at ~0.5 Hz each)
         if random.random() < dt * 0.5:
             btn = random.randint(0, 9)
             self.button_mask ^= (1 << btn)
 
-        # Slowly fluctuate loop timing
         self.loop_avg_us = int(420 + random.gauss(0, 15))
         self.loop_max_us = max(self.loop_avg_us, int(680 + random.gauss(0, 40)))
 
-    def _update_motors(self, dt: float):
+    def _update_motors(self, dt):
         for m in self.dc:
             m.update(dt)
 
-    def _update_steppers(self, dt: float):
+    def _update_steppers(self, dt):
         for s in self.steppers:
             s.update(dt)
 
-    def _update_kinematics(self, dt: float):
-        """Differential drive odometry from motors 0 (left) and 1 (right)."""
+    def _update_kinematics(self, dt):
         mm_per_tick = _MM_PER_TICK
-        v_left  = self.dc[0].velocity * mm_per_tick    # mm/s
+        v_left  = self.dc[0].velocity * mm_per_tick
         v_right = self.dc[1].velocity * mm_per_tick
-
         v_linear  = (v_left + v_right) * 0.5
         v_angular = (v_right - v_left) / self.wheel_base_mm
-
         self.odom_theta += v_angular * dt
         self.odom_x     += v_linear * math.cos(self.odom_theta) * dt
         self.odom_y     += v_linear * math.sin(self.odom_theta) * dt
 
-    def _update_imu(self, dt: float):
-        """Integrate angular velocity from kinematics into IMU yaw."""
+    def _update_imu(self, dt):
         mm_per_tick = _MM_PER_TICK
         v_left  = self.dc[0].velocity * mm_per_tick
         v_right = self.dc[1].velocity * mm_per_tick
         v_angular = (v_right - v_left) / self.wheel_base_mm
-        self.imu_yaw += v_angular * dt + random.gauss(0, 0.0005)   # gyro drift
+        self.imu_yaw += v_angular * dt + random.gauss(0, 0.0005)
 
     def _euler_to_quat(self, yaw, pitch, roll):
-        """ZYX Euler → quaternion (w, x, y, z)."""
         cy = math.cos(yaw * 0.5);   sy = math.sin(yaw * 0.5)
         cp = math.cos(pitch * 0.5); sp = math.sin(pitch * 0.5)
         cr = math.cos(roll * 0.5);  sr = math.sin(roll * 0.5)
@@ -510,23 +603,18 @@ class MockSerialManager:
     """
     Mock serial manager for development without hardware.
 
-    Simulates Arduino firmware at 20 Hz:
-    - Realistic DC motor physics (first-order velocity, PID position)
-    - Stepper trapezoidal motion profile
-    - Differential-drive kinematics and odometry
-    - IMU quaternion (integrated yaw) with sensor noise
-    - Battery voltage with realistic discharge
-    - IO button state simulation
+    Runs entirely within the asyncio event loop (no threads needed) — the mock
+    generates telemetry at a fixed rate without any blocking I/O. handle_incoming()
+    is called synchronously from the async loop, so asyncio.create_task() is safe.
 
-    All telemetry is pushed through message_router.handle_incoming() so the
-    full decode / 1-based conversion pipeline is exercised during development.
+    The real SerialManager uses a blocking reader thread and
+    asyncio.run_coroutine_threadsafe() instead — see above.
     """
 
-    # Telemetry tick divisors (at 100 Hz base rate)
-    _TICK_SYS_STATUS_IDLE    = 100  # 1 Hz
+    _TICK_SYS_STATUS_IDLE    = 100  # 1 Hz  (base rate 100 Hz)
     _TICK_SYS_STATUS_RUNNING = 10   # 10 Hz
     _TICK_VOLTAGE            = 10   # 10 Hz
-    _TICK_FULL               = 1    # 100 Hz (DC, step, servo, IMU, kin, IO)
+    _TICK_FULL               = 5    # 20 Hz (DC, step, servo, IMU, kin, IO)
 
     def __init__(self, message_router, ws_manager):
         self.message_router = message_router
@@ -548,17 +636,19 @@ class MockSerialManager:
         self.last_stats_time = 0.0
 
     # ------------------------------------------------------------------
-    # Command handler (called from app.py when UI sends a command)
+    # ROS2 stub — mock doesn't publish ROS2 topics (no hardware to mirror)
+    # ------------------------------------------------------------------
+
+    def set_ros2_node(self, node) -> None:
+        pass  # intentionally a no-op for the mock
+
+    # ------------------------------------------------------------------
+    # Command handler
     # ------------------------------------------------------------------
 
     def send(self, tlv_type: int, payload: ctypes.Structure):
-        """
-        Receive outgoing TLV from bridge — update Arduino simulation state.
-        payload already contains 0-based wire-format IDs (converted by router).
-        """
         self.stats["tx_count"] += 1
         self.arduino.receive_command()
-
         try:
             self._handle_command(tlv_type, payload)
         except Exception as e:
@@ -568,26 +658,26 @@ class MockSerialManager:
         a = self.arduino
 
         if tlv_type == SYS_HEARTBEAT:
-            pass   # liveness already reset in receive_command()
+            pass
 
         elif tlv_type == SYS_CMD:
             cmd = payload.command
-            if cmd == 1 and a.state == _SYS_IDLE:       # START
+            if cmd == 1 and a.state == _SYS_IDLE:
                 a.state = _SYS_RUNNING
                 a.neopixel_rgb = [0, 60, 0]
                 print("[Mock] Arduino → RUNNING")
-            elif cmd == 2 and a.state == _SYS_RUNNING:  # STOP
+            elif cmd == 2 and a.state == _SYS_RUNNING:
                 a.state = _SYS_IDLE
                 for m in a.dc:
                     m.mode = _DC_DISABLED
                 a.neopixel_rgb = [0, 20, 0]
                 print("[Mock] Arduino → IDLE")
-            elif cmd == 3 and a.state in (_SYS_ERROR, _SYS_ESTOP):  # RESET
+            elif cmd == 3 and a.state in (_SYS_ERROR, _SYS_ESTOP):
                 a.state = _SYS_IDLE
                 a.error_flags = 0
                 a.neopixel_rgb = [0, 20, 0]
                 print("[Mock] Arduino → IDLE (reset)")
-            elif cmd == 4:                              # ESTOP
+            elif cmd == 4:
                 a.state = _SYS_ESTOP
                 for m in a.dc:
                     m.mode = _DC_DISABLED
@@ -610,11 +700,11 @@ class MockSerialManager:
             mid = payload.motorId
             if 0 <= mid < 4:
                 m = a.dc[mid]
-                if payload.loopType == 0:   # position
+                if payload.loopType == 0:
                     m.kp_pos = payload.kp
                     m.ki_pos = payload.ki
                     m.kd_pos = payload.kd
-                else:                       # velocity
+                else:
                     m.kp_vel = payload.kp
                     m.ki_vel = payload.ki
                     m.kd_vel = payload.kd
@@ -660,9 +750,9 @@ class MockSerialManager:
         elif tlv_type == STEP_MOVE:
             sid = payload.stepperId
             if 0 <= sid < 4:
-                if payload.moveType == 0:   # absolute
+                if payload.moveType == 0:
                     a.steppers[sid].target = payload.target
-                else:                       # relative
+                else:
                     a.steppers[sid].target = int(a.steppers[sid].position) + payload.target
 
         elif tlv_type == STEP_HOME:
@@ -695,17 +785,15 @@ class MockSerialManager:
             a.neopixel_rgb = [payload.red, payload.green, payload.blue]
 
     # ------------------------------------------------------------------
-    # Telemetry generation helpers
+    # Telemetry generation
     # ------------------------------------------------------------------
 
     def _emit(self, tlv_type: int, payload: ctypes.Structure):
-        """Feed a ctypes struct through the message router as real Arduino data."""
         data = bytes(payload)
         self.message_router.handle_incoming(tlv_type, data)
         self.stats["rx_count"] += 1
 
     def _emit_raw(self, tlv_type: int, raw_bytes: bytes):
-        """Feed raw bytes (for variable-length payloads like IO_STATUS)."""
         self.message_router.handle_incoming(tlv_type, raw_bytes)
         self.stats["rx_count"] += 1
 
@@ -778,43 +866,34 @@ class MockSerialManager:
         p.pca9685Error     = a.servo_error
         p.enabledMask      = a.servo_enabled_mask
         for i in range(16):
-            if a.servo_enabled_mask & (1 << i):
-                p.pulseUs[i] = a.servo_pulses[i]
-            else:
-                p.pulseUs[i] = 0
+            p.pulseUs[i] = a.servo_pulses[i] if (a.servo_enabled_mask & (1 << i)) else 0
         self._emit(SERVO_STATUS_ALL, p)
 
     def _gen_sensor_imu(self):
         a = self.arduino
         qw, qx, qy, qz = a._euler_to_quat(a.imu_yaw, a.imu_pitch, a.imu_roll)
 
-        # Linear acceleration in body frame (gravity + robot acceleration)
         mm_per_tick = _MM_PER_TICK
         v_left  = a.dc[0].velocity * mm_per_tick
         v_right = a.dc[1].velocity * mm_per_tick
-        v_lin   = (v_left + v_right) * 0.5   # mm/s
 
         p = PayloadSensorIMU()
         p.quatW = qw;  p.quatX = qx;  p.quatY = qy;  p.quatZ = qz
 
-        # Earth-frame: gravity already removed; add small linear accel noise
         p.earthAccX = float(random.gauss(0, 0.005))
         p.earthAccY = float(random.gauss(0, 0.003))
         p.earthAccZ = float(random.gauss(0, 0.002))
 
-        # Body-frame raw accel: gravity on Z, robot forward on X
         p.rawAccX = int(_clamp(random.gauss(0, 5), -32768, 32767))
         p.rawAccY = int(_clamp(random.gauss(0, 3), -32768, 32767))
-        p.rawAccZ = int(_clamp(-9810 + random.gauss(0, 15), -32768, 32767))  # -1 g
+        p.rawAccZ = int(_clamp(-9810 + random.gauss(0, 15), -32768, 32767))
 
-        # Gyro (0.1 DPS units): Z axis from angular velocity
-        v_angular = (v_right - v_left) / a.wheel_base_mm   # rad/s
-        gyro_z_dps = math.degrees(v_angular) * 10.0        # 0.1 DPS
+        v_angular = (v_right - v_left) / a.wheel_base_mm
+        gyro_z_dps = math.degrees(v_angular) * 10.0
         p.rawGyroX = int(_clamp(random.gauss(0, 2), -32768, 32767))
         p.rawGyroY = int(_clamp(random.gauss(0, 2), -32768, 32767))
         p.rawGyroZ = int(_clamp(gyro_z_dps + random.gauss(0, 3), -32768, 32767))
 
-        # Magnetometer (µT) — roughly north-pointing
         p.magX = int(_clamp(25 + random.gauss(0, 2), -32768, 32767))
         p.magY = int(_clamp(-5 + random.gauss(0, 2), -32768, 32767))
         p.magZ = int(_clamp(-42 + random.gauss(0, 2), -32768, 32767))
@@ -856,10 +935,8 @@ class MockSerialManager:
         for i in range(3):
             p.ledBrightness[i] = a.led_brightness[i]
         p.timestamp = (a.uptime_us // 1000) & 0xFFFFFFFF
-
-        # Append NeoPixel RGB (neoPixelCount × 3 bytes)
         fixed_bytes = bytes(p)
-        neo_bytes = bytes(a.neopixel_rgb[:3])   # 1 pixel × 3 bytes
+        neo_bytes = bytes(a.neopixel_rgb[:3])
         self._emit_raw(IO_STATUS, fixed_bytes + neo_bytes)
 
     # ------------------------------------------------------------------
@@ -888,28 +965,25 @@ class MockSerialManager:
         self._running = True
         print("[Mock] Starting mock serial manager (100 Hz physics simulation)...")
 
-        TARGET_DT  = 0.01   # 100 Hz
-        last_tick  = time.monotonic()
+        TARGET_DT = 0.01
+        last_tick = time.monotonic()
 
         while self._running:
             now = time.monotonic()
             dt  = now - last_tick
             last_tick = now
 
-            # Advance physics
             self.arduino.update(dt)
             self._tick += 1
 
             a     = self.arduino
             state = a.state
 
-            # System status (always)
             sys_div = self._TICK_SYS_STATUS_RUNNING if state == _SYS_RUNNING \
                       else self._TICK_SYS_STATUS_IDLE
             if self._tick % sys_div == 0:
                 self._gen_sys_status()
 
-            # Full telemetry only in RUNNING state
             if state == _SYS_RUNNING:
                 if self._tick % self._TICK_FULL == 0:
                     self._gen_dc_status_all()
@@ -922,13 +996,11 @@ class MockSerialManager:
                 if self._tick % self._TICK_VOLTAGE == 0:
                     self._gen_sensor_voltage()
 
-            # Connection stats broadcast
             real_now = time.time()
             if real_now - self.last_stats_time >= STATS_INTERVAL:
                 await self._broadcast_stats()
                 self.last_stats_time = real_now
 
-            # Sleep to maintain ~20 Hz
             elapsed = time.monotonic() - now
             sleep_time = max(0.0, TARGET_DT - elapsed)
             await asyncio.sleep(sleep_time)
@@ -936,6 +1008,6 @@ class MockSerialManager:
     def stop(self):
         self._running = False
         stop_cmd = PayloadSysCmd()
-        stop_cmd.command = 2   # STOP
+        stop_cmd.command = 2
         self._handle_command(SYS_CMD, stop_cmd)
-        print("[Mock] Stopped")
+        print("[Mock] Stopped.")

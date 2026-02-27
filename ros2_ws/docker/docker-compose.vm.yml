@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.vm.yml — macOS / Windows development (mock mode)
+#
+# Usage (from MAE_162_2026/ repository root):
+#   docker compose -f ros2_ws/docker/docker-compose.vm.yml up
+#
+# Runs in mock mode (NUEVO_MOCK=1) — no Arduino required.
+# Use this for ROS2 learning and development on macOS or Windows.
+#
+# First startup builds nuevo_msgs + nuevo_bridge with colcon (~60s).
+# Subsequent restarts reuse the cached build artifacts (named volumes): ~5s.
+#   - Python / .msg changes → docker compose restart  (no image rebuild)
+#   - Pip dep changes        → docker compose build    (rebuilds image layer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  robot:
+    build:
+      context: ../..
+      dockerfile: ros2_ws/docker/Dockerfile.bridge
+
+    image: nuevo-ros2:latest
+
+    # Bridge networking + explicit port mapping so the web UI is reachable at
+    # http://localhost:8000 on Mac/Windows.
+    # (host networking on macOS maps to the Docker Linux VM, not the Mac — useless here.)
+    # ROS2 DDS still works locally within the container for single-node testing.
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # Source packages — live from repo (edits take effect on container restart).
+      - ../../ros2_ws/src/nuevo_msgs:/ros2_ws/src/nuevo_msgs:ro
+      - ../../nuevo_ui/backend:/ros2_ws/src/nuevo_bridge:ro
+      # colcon build cache — only slow on first run. Wipe with: docker compose down -v
+      - ros2_build:/ros2_ws/build
+      - ros2_install:/ros2_ws/install
+
+    environment:
+      - NUEVO_ROS2=1
+      - NUEVO_MOCK=1
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s   # allow time for first-run colcon build
+
+volumes:
+  ros2_build:
+  ros2_install:

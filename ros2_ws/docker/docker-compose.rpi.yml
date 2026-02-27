@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# docker-compose.rpi.yml — Raspberry Pi 5 with real Arduino
+#
+# Usage (from MAE_162_2026/ repository root):
+#   docker compose -f ros2_ws/docker/docker-compose.rpi.yml up
+#
+# First startup builds nuevo_msgs + nuevo_bridge with colcon (~60s).
+# Subsequent restarts reuse the cached build artifacts (named volumes): ~5s.
+#   - Python / .msg changes → docker compose restart  (no image rebuild)
+#   - Pip dep changes        → docker compose build    (rebuilds image layer)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  robot:
+    build:
+      context: ../..
+      dockerfile: ros2_ws/docker/Dockerfile.bridge
+
+    image: nuevo-ros2:latest
+
+    # ROS2 DDS (Fast-DDS / Cyclone) uses UDP multicast — requires host networking.
+    network_mode: host
+
+    # Arduino UART — RPi GPIO 14/15 (hardware UART).
+    devices:
+      - /dev/ttyAMA0:/dev/ttyAMA0
+
+    volumes:
+      # Source packages — live from repo (edits take effect on container restart).
+      - ../../ros2_ws/src/nuevo_msgs:/ros2_ws/src/nuevo_msgs:ro
+      - ../../nuevo_ui/backend:/ros2_ws/src/nuevo_bridge:ro
+      # colcon build cache — only slow on first run. Wipe with: docker compose down -v
+      - ros2_build:/ros2_ws/build
+      - ros2_install:/ros2_ws/install
+
+    environment:
+      - NUEVO_ROS2=1
+      - NUEVO_SERIAL_PORT=/dev/ttyAMA0
+      - NUEVO_SERIAL_BAUD=1000000
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 90s   # allow time for first-run colcon build
+
+volumes:
+  ros2_build:
+  ros2_install:

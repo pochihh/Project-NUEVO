@@ -4,7 +4,7 @@
 # Target: Raspberry Pi 5 running Ubuntu 25.10 server (arm64)
 # ROS2:   Jazzy Jalisco (multi-arch image includes linux/arm64)
 #
-# Build context: MAE_162_2026/ repository root
+# Build context: Project-NUEVO/ repository root
 #   docker compose -f ros2_ws/docker/docker-compose.bridge.yml build
 #
 # Both nuevo_msgs and nuevo_bridge source are volume-mounted at runtime
@@ -26,7 +26,63 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-colcon-common-extensions \
         python3-rosdep \
+        python3-opencv \
+        ros-jazzy-cv-bridge \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Raspberry Pi libcamera (Pi Camera V3 / IMX708 support) ────────────────────
+# Ubuntu 24.04's upstream libcamera 0.2 has no Raspberry Pi IPA modules, so
+# Pi Camera V3 (IMX708) returns "no cameras available". Fix: build RPi's fork
+# with the rpi/pisp pipeline (Pi 5 RP1 ISP) and rpi/vc4 (Pi 4 BCM2835 ISP).
+#
+# Confirmed root cause: https://github.com/christianrauch/camera_ros/issues/53
+# Official recommendation: https://github.com/raspberrypi/picamera2/issues/1337
+#
+# ⚠  First docker build: ~10 min compile. Docker layer cache skips this on
+#    subsequent builds unless this RUN block changes.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git cmake ninja-build pkg-config \
+        python3-dev python3-jinja2 python3-yaml python3-ply \
+        libboost-dev libgnutls28-dev openssl \
+        pybind11-dev libyaml-dev \
+        libjpeg-dev libpng-dev \
+    && git clone --depth 1 https://github.com/raspberrypi/libcamera.git /tmp/libcamera \
+    && meson setup /tmp/libcamera/build /tmp/libcamera \
+        --buildtype=release \
+        -Dpipelines=rpi/vc4,rpi/pisp \
+        -Dipas=rpi/vc4,rpi/pisp \
+        -Dv4l2=true \
+        -Dgstreamer=disabled \
+        -Dtest=false \
+        -Dlc-compliance=disabled \
+        -Dcam=disabled \
+        -Dqcam=disabled \
+        -Ddocumentation=disabled \
+        -Dpycamera=enabled \
+    && ninja -C /tmp/libcamera/build install \
+    && ldconfig \
+    && rm -rf /tmp/libcamera \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ── camera_ros — libcamera → ROS2 sensor_msgs/Image + CameraInfo topics ───────
+# Must build from source: the apt package (ros-jazzy-camera-ros) links against
+# Ubuntu's libcamera 0.2 ABI, which is incompatible with RPi's fork above.
+# Installed via --merge-install into /opt/ros/jazzy so no extra source step
+# is needed in the entrypoint.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-jazzy-camera-info-manager \
+        ros-jazzy-image-transport \
+    && mkdir -p /tmp/cam_ws/src \
+    && git clone --depth 1 https://github.com/christianrauch/camera_ros.git \
+        /tmp/cam_ws/src/camera_ros \
+    && cd /tmp/cam_ws \
+    && . /opt/ros/jazzy/setup.sh \
+    && colcon build \
+        --install-base /opt/ros/jazzy \
+        --merge-install \
+        --cmake-args -DBUILD_TESTING=OFF \
+    && rm -rf /tmp/cam_ws \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ── Python runtime deps for the bridge ───────────────────────────────────────
 RUN pip3 install --no-cache-dir --break-system-packages \

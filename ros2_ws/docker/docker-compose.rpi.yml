@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.rpi.yml — Raspberry Pi 5 with real Arduino
 #
-# Usage (from MAE_162_2026/ repository root):
+# Usage (from Project-NUEVO/ repository root):
 #   docker compose -f ros2_ws/docker/docker-compose.rpi.yml up
 #
 # First startup builds nuevo_msgs + nuevo_bridge with colcon (~60s).
@@ -25,6 +25,12 @@ services:
     devices:
       - /dev/ttyAMA0:/dev/ttyAMA0
 
+    # Pi Camera V3 via libcamera — Pi 5 exposes the camera through /dev/media*
+    # and /dev/video* (V4L2 sub-devices). libcamera also needs DMA heap access
+    # (/dev/dma_heap/*) for zero-copy buffer allocation on the RP1 ISP.
+    # privileged grants all of this without enumerating every device node.
+    privileged: true
+
     volumes:
       # Source packages — live from repo (edits take effect on container restart).
       - ../../ros2_ws/src/nuevo_msgs:/ros2_ws/src/nuevo_msgs:ro
@@ -32,11 +38,21 @@ services:
       # colcon build cache — only slow on first run. Wipe with: docker compose down -v
       - ros2_build:/ros2_ws/build
       - ros2_install:/ros2_ws/install
+      # udev exposes camera device-plug events; libcamera needs it to enumerate
+      # /dev/media* nodes at startup.
+      - /run/udev:/run/udev:ro
+
+    tmpfs:
+      # libcamera uses POSIX shared memory for DMA buffer passing; exec is
+      # required so the IPA proxy (a separate process) can map the buffers.
+      - /dev/shm:exec
 
     environment:
       - NUEVO_ROS2=1
       - NUEVO_SERIAL_PORT=/dev/ttyAMA0
       - NUEVO_SERIAL_BAUD=1000000
+      # Suppress libcamera INFO noise; change to DEBUG to troubleshoot camera
+      - LIBCAMERA_LOG_LEVELS=*:WARNING
 
     restart: unless-stopped
 

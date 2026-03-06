@@ -86,7 +86,7 @@ COMPOSE=ros2_ws/docker/docker-compose.vm.yml
 ## 3. Build the Docker image (one-time, or after pip dependency changes)
 
 ```bash
-# From the repository root (MAE_162_2026/)
+# From the repository root (Project-NUEVO/)
 docker compose -f $COMPOSE build
 ```
 

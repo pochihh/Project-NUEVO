@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.vm.yml — macOS / Windows development (mock mode)
 #
-# Usage (from MAE_162_2026/ repository root):
+# Usage (from Project-NUEVO/ repository root):
 #   docker compose -f ros2_ws/docker/docker-compose.vm.yml up
 #
 # Runs in mock mode (NUEVO_MOCK=1) — no Arduino required.

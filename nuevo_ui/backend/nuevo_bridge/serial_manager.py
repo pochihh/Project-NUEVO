@@ -515,7 +515,7 @@ class _ArduinoSim:
         self.servo_rail_mv = 0.0
 
         self.button_mask   = 0
-        self.led_brightness = [0, 0, 0]
+        self.led_brightness = [0, 0, 0, 0, 0]
         self.neopixel_rgb  = [0, 0, 30]
 
         self._init_timer = 0.0
@@ -774,8 +774,8 @@ class MockSerialManager:
 
         elif tlv_type == IO_SET_LED:
             lid = payload.ledId
-            if 0 <= lid < 3:
-                a.led_brightness[lid] = payload.brightness
+            if 0 <= lid < 5:
+                a.led_brightness[lid] = payload.brightness if payload.mode != 0 else 0
 
         elif tlv_type == IO_SET_NEOPIXEL:
             a.neopixel_rgb = [payload.red, payload.green, payload.blue]
@@ -926,7 +926,7 @@ class MockSerialManager:
         a = self.arduino
         p = PayloadIOStatus()
         p.buttonMask = a.button_mask
-        for i in range(3):
+        for i in range(5):
             p.ledBrightness[i] = a.led_brightness[i]
         p.timestamp = (a.uptime_us // 1000) & 0xFFFFFFFF
         fixed_bytes = bytes(p)

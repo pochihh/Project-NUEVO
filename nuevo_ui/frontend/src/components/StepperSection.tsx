@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useOptimisticEnable } from '../hooks/useOptimisticEnable';
 import { ChevronDown, Home } from 'lucide-react';
 import { Switch } from './ui/switch';
 import { Input } from './ui/input';
@@ -20,9 +21,12 @@ export function StepperSection({ stepperId }: StepperSectionProps) {
   const [targetPosition, setTargetPosition] = useState('0');
 
   const isEnabled = (status?.enabled ?? 0) !== 0;
+  const { switchChecked: enableSwitchChecked, dotEnabled, setOptimistic: setEnableOptimistic } =
+    useOptimisticEnable(isEnabled);
   const currentPosition = status?.commandedCount ?? 0;
 
   const handleEnable = (checked: boolean) => {
+    setEnableOptimistic(checked);
     wsSend('step_enable', { stepperNumber: stepperId, enable: checked ? 1 : 0 });
   };
 
@@ -63,11 +67,11 @@ export function StepperSection({ stepperId }: StepperSectionProps) {
 
           <div className="flex items-center justify-between mb-2">
             <div className="flex items-center gap-2">
-              <div className={`size-2 rounded-full ${isEnabled ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-white/30'}`}></div>
-              <span className="text-xs text-white/60">{isEnabled ? 'Enabled' : 'Disabled'}</span>
+              <div className={`size-2 rounded-full transition-all ${dotEnabled ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-white/30'}`}></div>
+              <span className="text-xs text-white/60">{dotEnabled ? 'Enabled' : 'Disabled'}</span>
             </div>
             <Switch
-              checked={isEnabled}
+              checked={enableSwitchChecked}
               onCheckedChange={handleEnable}
               onClick={(e) => e.stopPropagation()}
             />

@@ -39,9 +39,6 @@ export function UserIOSection() {
   const io     = useRobotStore((s) => s.io);
   const system = useRobotStore((s) => s.system);
 
-  // LED state — local (we send commands; no per-LED state in incoming data)
-  const [ledEnabled, setLedEnabled] = useState<boolean[]>(Array(5).fill(false));
-
   // NeoPixel strips
   const [strips, setStrips] = useState<WS2812B[]>([
     { id: 1, r: 255, g: 0, b: 0, brightness: 50, hue: 0 },
@@ -56,10 +53,12 @@ export function UserIOSection() {
   const isButtonPressed     = (id: number) => ((buttonMask >> (id - 1)) & 1) === 1;
   const isLimitPressed      = (id: number) => ((limitSwitchMask >> (id - 1)) & 1) === 1;
 
+  // Derive LED on/off from server-reported brightness (true = non-zero brightness)
+  const ledOn = (index: number): boolean => (io?.ledBrightness?.[index] ?? 0) > 0;
+
   const toggleLed = (index: number) => {
-    const next = !ledEnabled[index];
-    setLedEnabled((prev) => prev.map((v, i) => (i === index ? next : v)));
-    wsSend('set_led', { index, state: next });
+    const next = !ledOn(index);
+    wsSend('set_led', { ledId: index, mode: next ? 1 : 0, brightness: 255 });
   };
 
   const addStrip = () => {
@@ -162,14 +161,14 @@ export function UserIOSection() {
                     <div
                       className="size-3 rounded-full"
                       style={{
-                        backgroundColor: ledEnabled[i] ? led.color : "rgba(255,255,255,0.2)",
-                        boxShadow: ledEnabled[i] ? `0 0 8px ${led.color}` : "none",
+                        backgroundColor: ledOn(i) ? led.color : "rgba(255,255,255,0.2)",
+                        boxShadow: ledOn(i) ? `0 0 8px ${led.color}` : "none",
                       }}
                     />
                     <span className="text-xs text-white/70">{led.name}</span>
                   </div>
                   <Switch
-                    checked={ledEnabled[i]}
+                    checked={ledOn(i)}
                     onCheckedChange={() => toggleLed(i)}
                   />
                 </div>

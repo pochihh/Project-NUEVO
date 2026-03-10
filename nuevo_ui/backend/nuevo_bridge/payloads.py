@@ -531,16 +531,17 @@ class PayloadSetNeoPixel(ctypes.Structure):
 class PayloadIOStatus(ctypes.Structure):
     """
     TLV Type: IO_STATUS (1282)  Direction: Arduino → RPi
-    Size: 10 bytes fixed  (+ 3 × neoPixelCount bytes appended)
+    Size: 12 bytes fixed  (+ 3 × neoPixelCount bytes appended)
     Rate: 100 Hz in RUNNING state.
 
+    ledBrightness[0..4] = RED, GREEN, BLUE, ORANGE, PURPLE (0=off, 255=full).
     NeoPixel RGB data (neoPixelCount×3 bytes) is appended after the fixed fields
     and must be read separately from the raw TLV bytes.
     """
     _pack_ = 1
     _fields_ = [
         ("buttonMask",     ctypes.c_uint16),      # Digital input GPIO bitmask
-        ("ledBrightness",  ctypes.c_uint8 * 3),   # Brightness of user LEDs 0–2
+        ("ledBrightness",  ctypes.c_uint8 * 5),   # Brightness of all 5 user LEDs
         ("reserved",       ctypes.c_uint8),
         ("timestamp",      ctypes.c_uint32),
     ]
@@ -588,7 +589,7 @@ def verify_payload_sizes():
         # I/O
         PayloadSetLED:            8,
         PayloadSetNeoPixel:       4,
-        PayloadIOStatus:          10,
+        PayloadIOStatus:          12,
     }
 
     errors = []

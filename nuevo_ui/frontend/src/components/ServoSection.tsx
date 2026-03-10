@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { Switch } from './ui/switch';
 import { Slider } from './ui/slider';
@@ -17,10 +17,38 @@ export function ServoSection() {
   // Local angle state for the sliders (UI-driven, commands sent on change)
   const [angles, setAngles] = useState<number[]>(Array(16).fill(90));
 
+  // Per-channel optimistic enable: switch shows optimistic, dot shows server state
+  const [optimisticEnabled, setOptimisticEnabled] = useState<Record<number, boolean>>({});
+  const enableTimers = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+
+  // When server confirms a channel state, clear the optimistic for that channel
+  useEffect(() => {
+    if (!servo) return;
+    setOptimisticEnabled((prev) => {
+      if (Object.keys(prev).length === 0) return prev;
+      let changed = false;
+      const next = { ...prev };
+      for (const ch of servo.channels) {
+        const opt = prev[ch.channelNumber];
+        if (opt !== undefined && opt === ch.enabled) {
+          delete next[ch.channelNumber];
+          changed = true;
+          const timer = enableTimers.current[ch.channelNumber];
+          if (timer) { clearTimeout(timer); delete enableTimers.current[ch.channelNumber]; }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [servo]);
+
   const getChannelEnabled = (ch: number) => {
     const item = servo?.channels.find((c) => c.channelNumber === ch);
     return item?.enabled ?? false;
   };
+
+  // Switch uses optimistic if pending, otherwise server state
+  const getSwitchEnabled = (ch: number) =>
+    ch in optimisticEnabled ? optimisticEnabled[ch] : getChannelEnabled(ch);
 
   const getChannelPulse = (ch: number) => {
     const item = servo?.channels.find((c) => c.channelNumber === ch);
@@ -32,6 +60,13 @@ export function ServoSection() {
     : 0;
 
   const handleEnable = (ch: number, checked: boolean) => {
+    // Optimistic update
+    setOptimisticEnabled((prev) => ({ ...prev, [ch]: checked }));
+    if (enableTimers.current[ch]) clearTimeout(enableTimers.current[ch]);
+    enableTimers.current[ch] = setTimeout(() => {
+      setOptimisticEnabled((prev) => { const n = { ...prev }; delete n[ch]; return n; });
+      delete enableTimers.current[ch];
+    }, 1500);
     wsSend('servo_enable', { channel: ch, enable: checked });
   };
 
@@ -117,7 +152,8 @@ export function ServoSection() {
                 {/* 4×4 grid */}
                 <div className="grid grid-cols-4 gap-4">
                   {Array.from({ length: 16 }, (_, i) => i + 1).map((ch) => {
-                    const enabled = getChannelEnabled(ch);
+                    const switchEnabled = getSwitchEnabled(ch); // optimistic
+                    const dotEnabled    = getChannelEnabled(ch); // real server state
                     const angle   = angles[ch - 1];
                     const pulseUs = getChannelPulse(ch);
                     return (
@@ -128,7 +164,7 @@ export function ServoSection() {
                         <div className="flex items-center justify-between mb-3">
                           <span className="text-sm font-semibold text-white">Ch {ch}</span>
                           <Switch
-                            checked={enabled}
+                            checked={switchEnabled}
                             onCheckedChange={(checked) => handleEnable(ch, checked)}
                           />
                         </div>
@@ -144,13 +180,14 @@ export function ServoSection() {
                             min={0}
                             max={180}
                             step={1}
-                            disabled={!enabled}
+                            disabled={!switchEnabled}
                             className="w-full"
                           />
                         </div>
 
                         <div className="flex items-center justify-between">
-                          <div className={`size-2 rounded-full ${enabled ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-white/30'}`} />
+                          {/* Dot shows confirmed server state; switch shows optimistic */}
+                          <div className={`size-2 rounded-full transition-all ${dotEnabled ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-white/30'}`} />
                           <span className="text-xs font-mono text-white/50">{pulseUs} µs</span>
                         </div>
                       </div>

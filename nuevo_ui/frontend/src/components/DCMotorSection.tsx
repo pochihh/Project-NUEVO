@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
+import { useOptimisticEnable } from "../hooks/useOptimisticEnable";
 import { ChevronDown } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Input } from "./ui/input";
@@ -52,7 +53,10 @@ export function DCMotorSection({ motorId }: DCMotorSectionProps) {
   }, [showModal]); // intentionally omit status to avoid resetting while editing
 
   // ── Derived card display values ──────────────────────────────────────────
-  const isEnabled   = (status?.mode ?? 0) !== 0;
+  const isEnabled = (status?.mode ?? 0) !== 0;
+  const { switchChecked: enableSwitchChecked, dotEnabled, setOptimistic: setEnableOptimistic } =
+    useOptimisticEnable(isEnabled);
+
   const pwmRaw      = status?.pwmOutput ?? 0;
   const dutyCycle   = (Math.abs(pwmRaw) / 255) * 100;
   const velAbs      = Math.abs(status?.velocity ?? 0);
@@ -63,6 +67,7 @@ export function DCMotorSection({ motorId }: DCMotorSectionProps) {
 
   // ── Commands ─────────────────────────────────────────────────────────────
   const handleEnable = (checked: boolean) => {
+    setEnableOptimistic(checked);
     const mode = checked ? (status?.mode || 2) : 0;
     wsSend('dc_enable', { motorNumber: motorId, mode });
   };
@@ -135,10 +140,11 @@ export function DCMotorSection({ motorId }: DCMotorSectionProps) {
   // ── Modal header: enable switch ──────────────────────────────────────────
   const enableAction = (
     <div className="flex items-center gap-2">
-      <div className={`size-2 rounded-full ${isEnabled ? "bg-emerald-400 shadow-lg shadow-emerald-400/50" : "bg-white/30"}`} />
-      <span className="text-xs text-white/60">{isEnabled ? "Enabled" : "Disabled"}</span>
+      {/* Dot shows real server state; switch shows optimistic state */}
+      <div className={`size-2 rounded-full transition-all ${dotEnabled ? "bg-emerald-400 shadow-lg shadow-emerald-400/50" : "bg-white/30"}`} />
+      <span className="text-xs text-white/60">{dotEnabled ? "Enabled" : "Disabled"}</span>
       <Switch
-        checked={isEnabled}
+        checked={enableSwitchChecked}
         onCheckedChange={handleEnable}
       />
     </div>
@@ -159,10 +165,10 @@ export function DCMotorSection({ motorId }: DCMotorSectionProps) {
             <div className="flex items-center justify-between mb-2">
               <span className="text-base font-semibold text-white">M{motorId}</span>
               <div className="flex items-center gap-2 mr-3">
-                <div className={`size-2 rounded-full ${isEnabled ? "bg-emerald-400 shadow-lg shadow-emerald-400/50" : "bg-white/30"}`} />
-                <span className="text-xs text-white/60">{isEnabled ? "Enabled" : "Disabled"}</span>
+                <div className={`size-2 rounded-full transition-all ${dotEnabled ? "bg-emerald-400 shadow-lg shadow-emerald-400/50" : "bg-white/30"}`} />
+                <span className="text-xs text-white/60">{dotEnabled ? "Enabled" : "Disabled"}</span>
                 <Switch
-                  checked={isEnabled}
+                  checked={enableSwitchChecked}
                   onCheckedChange={handleEnable}
                   onClick={(e) => e.stopPropagation()}
                 />

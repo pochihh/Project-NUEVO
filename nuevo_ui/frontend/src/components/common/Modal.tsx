@@ -5,7 +5,7 @@
  * stacking contexts created by backdrop-filter (e.g. the PCB card's backdrop-blur-xl).
  * z-[200] ensures it sits above the sticky header (z-50) and all other UI.
  */
-import { type ReactNode } from 'react'
+import { type ReactNode, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { X } from 'lucide-react'
@@ -31,6 +31,10 @@ export function Modal({
   maxWidth = 'max-w-4xl',
   children,
 }: ModalProps) {
+  // Track where mousedown started so we only close when BOTH mousedown and mouseup
+  // happen on the backdrop — not when the user drags from inside the modal outward.
+  const mouseDownOnBackdrop = useRef(false)
+
   return createPortal(
     <AnimatePresence>
       {open && (
@@ -41,7 +45,8 @@ export function Modal({
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
           className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md"
-          onClick={onClose}
+          onMouseDown={(e) => { mouseDownOnBackdrop.current = e.target === e.currentTarget }}
+          onMouseUp={(e) => { if (mouseDownOnBackdrop.current && e.target === e.currentTarget) onClose() }}
         >
           <motion.div
             key="modal-card"
@@ -49,7 +54,6 @@ export function Modal({
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.93, opacity: 0, y: 12 }}
             transition={{ type: 'spring', damping: 28, stiffness: 320, mass: 0.8 }}
-            onClick={(e) => e.stopPropagation()}
             className={`relative w-full ${maxWidth} max-h-[88vh] overflow-y-auto rounded-3xl p-6 bg-white/10 backdrop-blur-2xl border border-white/20 shadow-2xl`}
           >
             {/* Top shimmer line */}

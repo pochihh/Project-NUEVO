@@ -1,4 +1,5 @@
-import { Activity, AlertTriangle, CheckCircle, Play, Square, RotateCcw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Activity, AlertTriangle, CheckCircle, Play, Square, RotateCcw, X, Loader2 } from 'lucide-react';
 import { useRobotStore } from '../store/robotStore';
 import { wsSend } from '../lib/wsSend';
 
@@ -20,16 +21,42 @@ function formatUptime(ms: number) {
 }
 
 export function ArduinoSystemSection() {
-  const system        = useRobotStore((s) => s.system);
+  const system          = useRobotStore((s) => s.system);
   const serialConnected = useRobotStore((s) => s.serialConnected);
+  const errorLog        = useRobotStore((s) => s.errorLog);
+  const clearErrorLog   = useRobotStore((s) => s.clearErrorLog);
 
   const firmwareState = system?.state ?? -1;
   const isRunning     = firmwareState === 2;
-  const isEstop       = firmwareState === 4;
+  const isErrorOrStop = firmwareState === 3 || firmwareState === 4;
 
-  const handleStart = () => wsSend('sys_cmd', { command: 1 });
-  const handleStop  = () => wsSend('sys_cmd', { command: 2 });
-  const handleReset = () => wsSend('sys_cmd', { command: 3 });
+  // ── Loading state for system action buttons ───────────────────────────────
+  // Clears automatically when firmware state changes or after 3 s timeout.
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
+  const pendingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevFirmwareState = useRef(firmwareState);
+
+  useEffect(() => {
+    if (prevFirmwareState.current !== firmwareState) {
+      prevFirmwareState.current = firmwareState;
+      setPendingAction(null);
+      if (pendingTimerRef.current) { clearTimeout(pendingTimerRef.current); pendingTimerRef.current = null; }
+    }
+  }, [firmwareState]);
+
+  const triggerAction = (action: string, command: number) => {
+    setPendingAction(action);
+    wsSend('sys_cmd', { command });
+    if (pendingTimerRef.current) clearTimeout(pendingTimerRef.current);
+    pendingTimerRef.current = setTimeout(() => {
+      setPendingAction(null);
+      pendingTimerRef.current = null;
+    }, 3000);
+  };
+
+  const handleStart = () => triggerAction('start', 1);
+  const handleStop  = () => triggerAction('stop',  2);
+  const handleReset = () => triggerAction('reset', 3);
 
   const stateInfo = system ? (STATE_LABELS[system.state] ?? { label: 'UNKNOWN', color: 'text-white/60' }) : null;
 
@@ -44,12 +71,15 @@ export function ArduinoSystemSection() {
           <h3 className="text-base font-semibold text-white">Arduino</h3>
           {serialConnected && (
             <div className="flex items-center gap-1.5">
-              {isEstop ? (
+              {isErrorOrStop ? (
                 <button
                   onClick={handleReset}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/40 border border-amber-400/60 hover:bg-amber-500/60 transition-all text-xs font-bold text-white animate-pulse"
+                  disabled={pendingAction !== null}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/40 border border-amber-400/60 hover:bg-amber-500/60 disabled:opacity-60 transition-all text-xs font-bold text-white animate-pulse"
                 >
-                  <RotateCcw className="size-3" />
+                  {pendingAction === 'reset'
+                    ? <Loader2 className="size-3 animate-spin" />
+                    : <RotateCcw className="size-3" />}
                   Reset
                 </button>
               ) : (
@@ -57,17 +87,23 @@ export function ArduinoSystemSection() {
                   {!isRunning ? (
                     <button
                       onClick={handleStart}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/30 border border-emerald-400/50 hover:bg-emerald-500/40 transition-all text-xs font-semibold text-white"
+                      disabled={pendingAction !== null}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/30 border border-emerald-400/50 hover:bg-emerald-500/40 disabled:opacity-60 transition-all text-xs font-semibold text-white"
                     >
-                      <Play className="size-3" />
+                      {pendingAction === 'start'
+                        ? <Loader2 className="size-3 animate-spin" />
+                        : <Play className="size-3" />}
                       Start
                     </button>
                   ) : (
                     <button
                       onClick={handleStop}
-                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/10 border border-white/20 hover:bg-white/20 transition-all text-xs font-semibold text-white"
+                      disabled={pendingAction !== null}
+                      className="flex items-center gap-1 px-2 py-1 rounded-lg bg-white/10 border border-white/20 hover:bg-white/20 disabled:opacity-60 transition-all text-xs font-semibold text-white"
                     >
-                      <Square className="size-3" />
+                      {pendingAction === 'stop'
+                        ? <Loader2 className="size-3 animate-spin" />
+                        : <Square className="size-3" />}
                       Stop
                     </button>
                   )}
@@ -123,7 +159,7 @@ export function ArduinoSystemSection() {
                 </div>
               </div>
 
-              {/* Errors */}
+              {/* UART Errors */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <AlertTriangle className={`size-4 ${system.uartRxErrors > 0 ? 'text-amber-400' : 'text-emerald-400'}`} />
@@ -149,7 +185,7 @@ export function ArduinoSystemSection() {
                 ) : system.state === 3 ? (
                   <>
                     <AlertTriangle className="size-3 text-rose-400" />
-                    <span className="text-xs text-rose-400">Error (flags: 0x{system.errorFlags.toString(16)})</span>
+                    <span className="text-xs text-rose-400">Error (flags: 0x{system.errorFlags.toString(16).padStart(2, '0')})</span>
                   </>
                 ) : (
                   <>
@@ -158,6 +194,35 @@ export function ArduinoSystemSection() {
                   </>
                 )}
               </div>
+
+              {/* Error log */}
+              {errorLog.length > 0 && (
+                <div className="rounded-xl backdrop-blur-xl bg-rose-500/10 border border-rose-500/30 p-2">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-xs font-semibold text-rose-300 flex items-center gap-1">
+                      <AlertTriangle className="size-3" />
+                      Fault Log
+                    </span>
+                    <button
+                      onClick={clearErrorLog}
+                      className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs text-white/50 hover:text-white hover:bg-white/10 transition-all"
+                    >
+                      <X className="size-3" />
+                      Clear
+                    </button>
+                  </div>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {errorLog.map((entry) => (
+                      <div key={entry.key} className="flex items-center justify-between">
+                        <span className="text-xs text-rose-200">{entry.label}</span>
+                        <span className="text-xs font-mono font-bold text-rose-300 bg-rose-500/20 px-1.5 py-0.5 rounded-full min-w-[1.5rem] text-center">
+                          {entry.count}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <div className="rounded-xl backdrop-blur-xl bg-white/5 border border-white/10 p-2">

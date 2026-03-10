@@ -29,6 +29,39 @@ interface DCMotorState {
   recordingStartTs: number | null  // bridge time ms when recording started; null = not recording
 }
 
+export interface ErrorLogEntry {
+  key: string    // unique error identifier
+  label: string  // human-readable description
+  count: number  // times seen since last clear
+}
+
+// System errorFlags bit → label
+const SYSTEM_ERROR_LABELS: [number, string][] = [
+  [0x01, 'Undervoltage'],
+  [0x02, 'Overvoltage'],
+  [0x04, 'Encoder Fail'],
+  [0x08, 'I2C Error'],
+  [0x10, 'IMU Error'],
+  [0x20, 'Liveness Lost'],
+  [0x40, 'Loop Overrun'],
+]
+
+// DC motor faultFlags bit → label suffix
+const DC_FAULT_LABELS: [number, string][] = [
+  [0x01, 'Overcurrent'],
+  [0x02, 'Stall'],
+]
+
+function addOrIncrement(log: ErrorLogEntry[], key: string, label: string): ErrorLogEntry[] {
+  const idx = log.findIndex((e) => e.key === key)
+  if (idx >= 0) {
+    const next = [...log]
+    next[idx] = { ...next[idx], count: next[idx].count + 1 }
+    return next
+  }
+  return [...log, { key, label, count: 1 }]
+}
+
 interface RobotState {
   connected: boolean
   serialConnected: boolean
@@ -42,8 +75,10 @@ interface RobotState {
   kinematics: KinematicsData | null
   imu: IMUData | null
   magCal: MagCalStatusData | null
+  errorLog: ErrorLogEntry[]
   dispatch: (topic: string, data: any, ts?: number) => void
   setMotorRecording: (motorIdx: number, active: boolean) => void
+  clearErrorLog: () => void
 }
 
 const HISTORY_WINDOW_MS = 22_000
@@ -73,6 +108,9 @@ export const useRobotStore = create<RobotState>((set) => ({
   kinematics: null,
   imu: null,
   magCal: null,
+  errorLog: [],
+
+  clearErrorLog: () => set({ errorLog: [] }),
 
   setMotorRecording: (motorIdx: number, active: boolean) => {
     set((state) => {
@@ -95,6 +133,19 @@ export const useRobotStore = create<RobotState>((set) => ({
       case 'system_status': {
         const newSystem = data as SystemStatusData
         set({ system: newSystem })
+
+        // Decode errorFlags bits and accumulate into error log
+        if (newSystem.errorFlags) {
+          set((state) => {
+            let log = state.errorLog
+            for (const [bit, label] of SYSTEM_ERROR_LABELS) {
+              if (newSystem.errorFlags & bit) {
+                log = addOrIncrement(log, `sys_${bit}`, label)
+              }
+            }
+            return { errorLog: log }
+          })
+        }
 
         // When ESTOP/ERROR is detected, immediately reflect disabled state in the UI
         // without waiting for individual motor/servo/stepper status updates.
@@ -137,6 +188,22 @@ export const useRobotStore = create<RobotState>((set) => ({
         const bridgeTimeMs = ts ? ts * 1000 : Date.now()
         const cutoff = bridgeTimeMs - HISTORY_WINDOW_MS
         const motors = (data as DCStatusAllData).motors
+
+        // Log DC motor faults
+        for (const motor of motors) {
+          if (motor.faultFlags) {
+            set((state) => {
+              let log = state.errorLog
+              for (const [bit, suffix] of DC_FAULT_LABELS) {
+                if (motor.faultFlags & bit) {
+                  const key = `dc_${bit}_${motor.motorNumber}`
+                  log = addOrIncrement(log, key, `Motor ${motor.motorNumber} ${suffix}`)
+                }
+              }
+              return { errorLog: log }
+            })
+          }
+        }
 
         set((state) => {
           const newDCMotors = [...state.dcMotors]

@@ -1623,6 +1623,7 @@ void MessageCenter::sendSysState()
     static uint32_t prevLateComputeCount = 0;
     static uint32_t prevReusedOutputCount = 0;
     static uint32_t prevCrossRoundComputeCount = 0;
+    static bool prevNoBatteryWarning = false;
 
     PayloadSysState payload;
     memset(&payload, 0, sizeof(payload));
@@ -1641,9 +1642,11 @@ void MessageCenter::sendSysState()
     if (LoopMonitor::consumeFaultEventMask() != 0U) {
         payload.warningFlags |= WARN_LOOP_OVERRUN;
     }
-    if (!SensorManager::isBatteryPresent()) {
+    const bool noBatteryWarning = SystemManager::shouldWarnNoBattery();
+    if (noBatteryWarning && !prevNoBatteryWarning) {
         payload.warningFlags |= WARN_NO_BATTERY;
     }
+    prevNoBatteryWarning = noBatteryWarning;
     uint32_t roundCount = 0;
     uint32_t requestedRound = 0;
     uint32_t computedRound = 0;
@@ -1686,7 +1689,7 @@ void MessageCenter::sendSysState()
     }
 
     payload.errorFlags = faultLatchFlags_;
-    if (SensorManager::isBatteryCritical()) {
+    if (SensorManager::isBatteryPresent() && SensorManager::isBatteryCritical()) {
         payload.errorFlags |= ERR_UNDERVOLTAGE;
     }
     if (SensorManager::isBatteryOvervoltage()) {

@@ -146,6 +146,15 @@ public:
     static bool shouldTripBatteryFault();
 
     /**
+     * @brief Report whether the current no-battery condition should remain a warning.
+     *
+     * Missing battery is only a warning while no RUNNING-session battery fault
+     * has been armed yet. Once battery power has been seen during RUNNING,
+     * later loss of battery should be treated as an error condition only.
+     */
+    static bool shouldWarnNoBattery();
+
+    /**
      * @brief Report the currently active battery-related error flags.
      *
      * Returns ERR_UNDERVOLTAGE and/or ERR_OVERVOLTAGE according to the current

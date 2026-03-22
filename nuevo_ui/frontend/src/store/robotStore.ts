@@ -67,6 +67,8 @@ const DC_FAULT_LABELS: [number, string][] = [
 ]
 
 const HISTORY_WINDOW_MS = 22_000
+const BATTERY_PRESENT_MV = 2000
+const BATTERY_UNDERVOLTAGE_CLEAR_MV = 10000
 
 function addOrIncrement(log: ErrorLogEntry[], key: string, label: string): ErrorLogEntry[] {
   const idx = log.findIndex((e) => e.key === key)
@@ -91,9 +93,18 @@ function initDCMotors(): DCMotorState[] {
   }))
 }
 
-function buildLegacyErrorFlags(sysState: SysStateData | null): number {
+function buildLegacyErrorFlags(sysState: SysStateData | null, sysPower: SysPowerData | null): number {
   if (!sysState) return 0
-  return int(sysState.errorFlags)
+  let errorFlags = int(sysState.errorFlags)
+  const batteryMv = int(sysPower?.batteryMv)
+
+  // The live system header should follow the freshest power telemetry, not
+  // an older sys_state packet that still carried a battery-related fault bit.
+  if (batteryMv >= BATTERY_UNDERVOLTAGE_CLEAR_MV) {
+    errorFlags &= ~0x01
+  }
+
+  return errorFlags
 }
 
 function int(value: number | undefined | null): number {
@@ -116,6 +127,12 @@ function buildSystemStatus(
   sysDiag: SysDiagRspData | null,
 ): SystemStatusData | null {
   if (!sysState) return null
+  let warningFlags = int(sysState.warningFlags)
+  const batteryMv = int(sysPower?.batteryMv)
+  const errorFlags = buildLegacyErrorFlags(sysState, sysPower)
+  if (batteryMv >= BATTERY_PRESENT_MV) {
+    warningFlags &= ~0x04
+  }
   return {
     firmwareMajor: int(sysInfo?.firmwareMajor),
     firmwareMinor: int(sysInfo?.firmwareMinor),
@@ -126,7 +143,7 @@ function buildSystemStatus(
     lastCmdMs: int(sysState.lastCmdMs),
     batteryMv: int(sysPower?.batteryMv),
     rail5vMv: int(sysPower?.rail5vMv),
-    errorFlags: buildLegacyErrorFlags(sysState),
+    errorFlags,
     attachedSensors: buildAttachedSensorsMask(sysInfo),
     freeSram: int(sysDiag?.freeSram),
     loopTimeAvgUs: int(sysDiag?.loopTimeAvgUs),
@@ -137,7 +154,7 @@ function buildSystemStatus(
     heartbeatTimeoutMs: int(sysConfig?.heartbeatTimeoutMs),
     limitSwitchMask: int(sysInfo?.limitSwitchMask),
     stepperHomeLimitGpio: sysInfo?.stepperHomeLimitGpio ?? [0xFF, 0xFF, 0xFF, 0xFF],
-    warningFlags: int(sysState.warningFlags),
+    warningFlags,
     runtimeFlags: int(sysState.runtimeFlags),
   }
 }

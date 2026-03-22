@@ -159,6 +159,13 @@ bool SystemManager::shouldTripBatteryFault() {
     return (!batteryPresent) || batteryCritical || batteryOvervoltage;
 }
 
+bool SystemManager::shouldWarnNoBattery() {
+    if (SensorManager::isBatteryPresent()) {
+        return false;
+    }
+    return !(getState() == SYS_STATE_RUNNING && batteryFaultArmed_);
+}
+
 uint8_t SystemManager::getBatteryFaultFlags() {
     uint8_t flags = 0;
     if (!SensorManager::isBatteryPresent() || SensorManager::isBatteryCritical()) {

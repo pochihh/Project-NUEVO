@@ -32,7 +32,7 @@ finishes.
 
 WHAT THIS TEACHES
 -----------------
-1. `step_home()` for stepper homing at startup
+1. `home_stepper()` for stepper homing at startup
 2. `set_servo()` for gripper angle control
 3. `enable_motor(..., DCMotorMode.POSITION)` for M3 position control
 4. `set_motor_position(..., max_vel_ticks=...)` to apply a velocity limit
@@ -108,8 +108,8 @@ def show_running_leds(robot: Robot) -> None:
 def home_arm(robot: Robot) -> bool:
     """Home the arm stepper against its limit switch."""
     print("[FSM] HOMING — press BTN_3 to trigger the shared LIM1 input for stepper 1")
-    robot.step_enable(ARM_STEPPER)
-    ok = robot.step_home(
+    robot.enable_stepper(ARM_STEPPER)
+    ok = robot.home_stepper(
         ARM_STEPPER,
         direction=-1,
         home_velocity=ARM_HOME_VELOCITY,
@@ -119,9 +119,9 @@ def home_arm(robot: Robot) -> bool:
     )
     if not ok:
         print("[warn] arm homing timed out — check LIM1 or use BTN_3 to simulate it")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         return False
-    robot.step_disable(ARM_STEPPER)
+    robot.disable_stepper(ARM_STEPPER)
     return True
 
 
@@ -151,14 +151,14 @@ def restore_idle_lift(robot: Robot) -> bool:
 
 def run_pick_sequence(robot: Robot) -> bool:
     """Run one blocking pick sequence from top to bottom."""
-    robot.step_set_config(
+    robot.set_stepper_config(
         ARM_STEPPER,
         max_velocity=ARM_MAX_VELOCITY,
         acceleration=ARM_ACCELERATION,
     )
     robot.enable_servo(GRIPPER_SERVO)
     robot.enable_motor(LIFT_MOTOR, DCMotorMode.POSITION)
-    robot.step_enable(ARM_STEPPER)
+    robot.enable_stepper(ARM_STEPPER)
 
     print("[SEQ] raise lift")
     if not robot.set_motor_position(
@@ -170,13 +170,13 @@ def run_pick_sequence(robot: Robot) -> bool:
         timeout=LIFT_MOVE_TIMEOUT_S,
     ):
         print("[warn] lift failed to reach the raised position")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         robot.disable_servo(GRIPPER_SERVO)
         robot.disable_motor(LIFT_MOTOR)
         return False
 
     print("[SEQ] extend arm")
-    if not robot.step_move(
+    if not robot.move_stepper(
         ARM_STEPPER,
         steps=ARM_EXTEND_STEPS,
         move_type=StepMoveType.RELATIVE,
@@ -184,7 +184,7 @@ def run_pick_sequence(robot: Robot) -> bool:
         timeout=ARM_MOVE_TIMEOUT_S,
     ):
         print("[warn] arm failed to extend — check stepper enable or home limit wiring")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         robot.disable_servo(GRIPPER_SERVO)
         robot.disable_motor(LIFT_MOTOR)
         return False
@@ -203,7 +203,7 @@ def run_pick_sequence(robot: Robot) -> bool:
         timeout=LIFT_MOVE_TIMEOUT_S,
     ):
         print("[warn] lift failed to lower")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         robot.disable_servo(GRIPPER_SERVO)
         robot.disable_motor(LIFT_MOTOR)
         return False
@@ -222,13 +222,13 @@ def run_pick_sequence(robot: Robot) -> bool:
         timeout=LIFT_MOVE_TIMEOUT_S,
     ):
         print("[warn] lift failed to raise with the part")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         robot.disable_servo(GRIPPER_SERVO)
         robot.disable_motor(LIFT_MOTOR)
         return False
 
     print("[SEQ] retract arm")
-    if not robot.step_move(
+    if not robot.move_stepper(
         ARM_STEPPER,
         steps=ARM_EXTEND_STEPS,
         move_type=StepMoveType.RELATIVE,
@@ -236,12 +236,12 @@ def run_pick_sequence(robot: Robot) -> bool:
         timeout=ARM_MOVE_TIMEOUT_S,
     ):
         print("[warn] arm failed to retract")
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
         robot.disable_servo(GRIPPER_SERVO)
         robot.disable_motor(LIFT_MOTOR)
         return False
 
-    robot.step_disable(ARM_STEPPER)
+    robot.disable_stepper(ARM_STEPPER)
     robot.disable_servo(GRIPPER_SERVO)
 
     print("[SEQ] return lift to idle")

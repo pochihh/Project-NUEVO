@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import importlib
 import math
-import numpy as np
 import sys
 import threading
 import time
@@ -465,14 +464,65 @@ class RobotApiTests(unittest.TestCase):
         self.robot._on_dc_pid(rsp)
         self.assertIs(self.robot.get_pid(2, self.hardware_map.DCPidLoop.VELOCITY), rsp)
 
-    def test_request_step_config_and_get_step_config_cache(self) -> None:
-        self.robot.request_step_config(3)
+    def test_request_stepper_config_and_get_stepper_config_cache(self) -> None:
+        self.robot.request_stepper_config(3)
         req = self.node.publishers["/step_config_req"].published[-1]
         self.assertEqual(req.stepper_number, 3)
 
         rsp = types.SimpleNamespace(stepper_number=3, max_velocity=800, acceleration=1200)
         self.robot._on_step_config(rsp)
-        self.assertIs(self.robot.get_step_config(3), rsp)
+        self.assertIs(self.robot.get_stepper_config(3), rsp)
+
+    def test_deprecated_stepper_aliases_warn_and_delegate(self) -> None:
+        aliases = (
+            ("step_enable", "enable_stepper", (1,), {}, (1,), {}, False),
+            ("step_disable", "disable_stepper", (1,), {}, (1,), {}, False),
+            (
+                "step_move",
+                "move_stepper",
+                (1, 20),
+                {"blocking": False},
+                (1, 20, self.hardware_map.StepMoveType.RELATIVE, False, None),
+                {},
+                True,
+            ),
+            (
+                "step_home",
+                "home_stepper",
+                (1,),
+                {"blocking": False},
+                (1, -1, 500, 50, False, None),
+                {},
+                True,
+            ),
+            ("step_set_config", "set_stepper_config", (1, 100, 200), {}, (1, 100, 200), {}, False),
+            ("request_step_config", "request_stepper_config", (1,), {}, (1,), {}, False),
+            ("get_step_config", "get_stepper_config", (1,), {}, (1,), {}, True),
+            ("get_step_state", "get_stepper_state", (), {}, (), {}, True),
+        )
+
+        for (
+            old_name,
+            new_name,
+            args,
+            kwargs,
+            forwarded_args,
+            forwarded_kwargs,
+            returns_value,
+        ) in aliases:
+            with self.subTest(alias=old_name):
+                result = object()
+                with mock.patch.object(self.robot, new_name, return_value=result) as method:
+                    with self.assertWarnsRegex(
+                        DeprecationWarning,
+                        f"{old_name}\\(\\) is deprecated; use {new_name}\\(\\)",
+                    ):
+                        alias_result = getattr(self.robot, old_name)(*args, **kwargs)
+                method.assert_called_once_with(*forwarded_args, **forwarded_kwargs)
+                if returns_value:
+                    self.assertIs(alias_result, result)
+                else:
+                    self.assertIsNone(alias_result)
 
     def test_get_io_output_state_returns_cached_message(self) -> None:
         msg = types.SimpleNamespace(led_brightness=[0, 1, 2, 3, 4], neo_pixel_count=2)

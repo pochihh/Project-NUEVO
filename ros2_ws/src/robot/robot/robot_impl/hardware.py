@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import threading
 import time
+import warnings
 from enum import IntEnum
 
 from bridge_interfaces.msg import (
@@ -326,7 +327,7 @@ class HardwareMixin:
     # Stepper motors
     # =========================================================================
 
-    def step_enable(self, stepper_id: int) -> None:
+    def enable_stepper(self, stepper_id: int) -> None:
         """Enable a stepper motor."""
         stepper_id = self._require_id("stepper_id", stepper_id, 1, 4)
         msg = StepEnable()
@@ -334,7 +335,7 @@ class HardwareMixin:
         msg.enable = True
         self._step_en_pub.publish(msg)
 
-    def step_disable(self, stepper_id: int) -> None:
+    def disable_stepper(self, stepper_id: int) -> None:
         """Disable a stepper motor."""
         stepper_id = self._require_id("stepper_id", stepper_id, 1, 4)
         msg = StepEnable()
@@ -342,7 +343,7 @@ class HardwareMixin:
         msg.enable = False
         self._step_en_pub.publish(msg)
 
-    def step_move(
+    def move_stepper(
         self,
         stepper_id: int,
         steps: int,
@@ -366,7 +367,7 @@ class HardwareMixin:
             return True
         return self._wait_stepper_idle(stepper_id, timeout)
 
-    def step_home(
+    def home_stepper(
         self,
         stepper_id: int,
         direction: int = -1,
@@ -390,7 +391,7 @@ class HardwareMixin:
             return True
         return self._wait_stepper_idle(stepper_id, timeout)
 
-    def step_set_config(
+    def set_stepper_config(
         self,
         stepper_id: int,
         max_velocity: int,
@@ -404,23 +405,126 @@ class HardwareMixin:
         msg.acceleration   = int(acceleration)
         self._step_cfg_pub.publish(msg)
 
-    def request_step_config(self, stepper_id: int) -> None:
+    def request_stepper_config(self, stepper_id: int) -> None:
         """Request current speed/acceleration config for one stepper."""
         stepper_id = self._require_id("stepper_id", stepper_id, 1, 4)
         msg = StepConfigReq()
         msg.stepper_number = stepper_id
         self._step_cfg_req_pub.publish(msg)
 
-    def get_step_config(self, stepper_id: int) -> StepConfig | None:
+    def get_stepper_config(self, stepper_id: int) -> StepConfig | None:
         """Return cached config for one stepper, or None if not yet seen."""
         stepper_id = self._require_id("stepper_id", stepper_id, 1, 4)
         with self._lock:
             return self._step_config_cache.get(stepper_id)
 
-    def get_step_state(self) -> StepStateAll:
+    def get_stepper_state(self) -> StepStateAll:
         """Return cached stepper motor state."""
         with self._lock:
             return self._step_state
+
+    # =========================================================================
+    # Deprecated step_* compatibility aliases
+    # =========================================================================
+
+    def step_enable(self, stepper_id: int) -> None:
+        """Deprecated; use enable_stepper()."""
+        warnings.warn(
+            "step_enable() is deprecated; use enable_stepper()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.enable_stepper(stepper_id)
+
+    def step_disable(self, stepper_id: int) -> None:
+        """Deprecated; use disable_stepper()."""
+        warnings.warn(
+            "step_disable() is deprecated; use disable_stepper()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.disable_stepper(stepper_id)
+
+    def step_move(
+        self,
+        stepper_id: int,
+        steps: int,
+        move_type: StepMoveType | int = StepMoveType.RELATIVE,
+        blocking: bool = True,
+        timeout: float = None,
+    ) -> bool:
+        """Deprecated; use move_stepper()."""
+        warnings.warn(
+            "step_move() is deprecated; use move_stepper()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.move_stepper(stepper_id, steps, move_type, blocking, timeout)
+
+    def step_home(
+        self,
+        stepper_id: int,
+        direction: int = -1,
+        home_velocity: int = 500,
+        backoff_steps: int = 50,
+        blocking: bool = True,
+        timeout: float = None,
+    ) -> bool:
+        """Deprecated; use home_stepper()."""
+        warnings.warn(
+            "step_home() is deprecated; use home_stepper()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.home_stepper(
+            stepper_id,
+            direction,
+            home_velocity,
+            backoff_steps,
+            blocking,
+            timeout,
+        )
+
+    def step_set_config(
+        self,
+        stepper_id: int,
+        max_velocity: int,
+        acceleration: int,
+    ) -> None:
+        """Deprecated; use set_stepper_config()."""
+        warnings.warn(
+            "step_set_config() is deprecated; use set_stepper_config()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.set_stepper_config(stepper_id, max_velocity, acceleration)
+
+    def request_step_config(self, stepper_id: int) -> None:
+        """Deprecated; use request_stepper_config()."""
+        warnings.warn(
+            "request_step_config() is deprecated; use request_stepper_config()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.request_stepper_config(stepper_id)
+
+    def get_step_config(self, stepper_id: int) -> StepConfig | None:
+        """Deprecated; use get_stepper_config()."""
+        warnings.warn(
+            "get_step_config() is deprecated; use get_stepper_config()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_stepper_config(stepper_id)
+
+    def get_step_state(self) -> StepStateAll:
+        """Deprecated; use get_stepper_state()."""
+        warnings.warn(
+            "get_step_state() is deprecated; use get_stepper_state()",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.get_stepper_state()
 
     # =========================================================================
     # Servos

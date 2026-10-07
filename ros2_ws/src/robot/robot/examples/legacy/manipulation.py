@@ -20,7 +20,7 @@ Edit the constants below to match your actual setup.
                      GRIPPER_CLOSE_DEG (e.g. 90°) = gripping
 
     Stepper 1      — horizontal arm extension
-                     Home = fully retracted (use step_home() before running)
+                     Home = fully retracted (use home_stepper() before running)
                      ARM_EXTEND_STEPS forward from home = over pick station
 
     DC Motor 3     — vertical lift (POSITION mode)
@@ -44,7 +44,7 @@ WHAT THIS TEACHES
 1. Coordinating servo, stepper, and DC motor in one sequence
 2. run_task() / TaskHandle  — background sequence with cancellation support
 3. task.sleep()             — cancellable delay inside a sequence
-4. step_home()              — homing against a limit switch before moving
+4. home_stepper()           — homing against a limit switch before moving
 5. set_motor_position()     — DC motor position control with blocking
 6. Separating sequence logic (worker functions) from FSM state logic
 """
@@ -114,12 +114,12 @@ def start_robot(robot: Robot) -> None:
 
 def home_arm(robot: Robot) -> None:
     """Home the stepper arm against its limit switch. Blocks until complete."""
-    robot.step_set_config(
+    robot.set_stepper_config(
         ARM_STEPPER,
         max_velocity=ARM_MAX_VELOCITY,
         acceleration=ARM_ACCELERATION,
     )
-    ok = robot.step_home(
+    ok = robot.home_stepper(
         ARM_STEPPER,
         direction=-1,
         home_velocity=ARM_HOME_VELOCITY,
@@ -168,8 +168,8 @@ def pick_disk(robot: Robot, blocking: bool = True, timeout: float = None):
 
         # 2. Extend arm over pick station
         print("[SEQ] extending arm")
-        robot.step_enable(ARM_STEPPER)
-        robot.step_move(
+        robot.enable_stepper(ARM_STEPPER)
+        robot.move_stepper(
             ARM_STEPPER,
             steps=ARM_EXTEND_STEPS,
             move_type=StepMoveType.RELATIVE,
@@ -218,14 +218,14 @@ def pick_disk(robot: Robot, blocking: bool = True, timeout: float = None):
 
         # 7. Retract arm
         print("[SEQ] retracting arm")
-        robot.step_move(
+        robot.move_stepper(
             ARM_STEPPER,
             steps=ARM_EXTEND_STEPS,
             move_type=StepMoveType.RELATIVE,
             blocking=True,
             timeout=10.0,
         )
-        robot.step_disable(ARM_STEPPER)
+        robot.disable_stepper(ARM_STEPPER)
 
         print("[SEQ] pick complete")
 

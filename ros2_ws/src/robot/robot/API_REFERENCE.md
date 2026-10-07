@@ -101,7 +101,7 @@ most recent message (or `None` if no message has arrived yet).
 | `/sys_state` | 10 Hz | `get_state()` |
 | `/sys_power` | 10 Hz | `get_power()` |
 | `/dc_state_all` | 50 Hz | `get_dc_state()` |
-| `/step_state_all` | 50 Hz | `get_step_state()` |
+| `/step_state_all` | 50 Hz | `get_stepper_state()` |
 | `/servo_state_all` | 10 Hz | `get_servo_state()` |
 | `/io_input_state` | 50 Hz | `get_button()`, `get_limit()` |
 | `/io_output_state` | 10 Hz | `get_io_output_state()` |
@@ -127,7 +127,7 @@ These return `None` until you explicitly request a snapshot.
 |----------------|----------------|--------|
 | `request_odometry_parameters()` | `/sys_odom_param_rsp` | `get_odometry_parameters()` |
 | `request_pid(motor_id, loop_type)` | `/dc_pid_rsp` | `get_pid(motor_id, loop_type)` |
-| `request_step_config(stepper_id)` | `/step_config_rsp` | `get_step_config(stepper_id)` |
+| `request_stepper_config(stepper_id)` | `/step_config_rsp` | `get_stepper_config(stepper_id)` |
 
 `request_odometry_parameters()` is called automatically at construction, so
 `get_odometry_parameters()` is normally pre-populated.
@@ -718,35 +718,40 @@ Each `motors[i]` (`DCMotorState`) contains: `motor_number`, `mode`,
 
 Stepper IDs are 1-based (1–4).
 
-#### `step_enable(stepper_id) / step_disable(stepper_id) → None`
+#### `enable_stepper(stepper_id) / disable_stepper(stepper_id) → None`
 Enable or disable a stepper. Publishes `/step_enable`.
 
-#### `step_move(stepper_id, steps, move_type=StepMoveType.RELATIVE, blocking=True, timeout=None) → bool`
+#### `move_stepper(stepper_id, steps, move_type=StepMoveType.RELATIVE, blocking=True, timeout=None) → bool`
 Move a stepper. `move_type`: `StepMoveType.ABSOLUTE` or `StepMoveType.RELATIVE`.
 Returns `True` on completion, `False` on timeout. Publishes `/step_move`.
 
-#### `step_home(stepper_id, direction=-1, home_velocity=500, backoff_steps=50, blocking=True, timeout=None) → bool`
+#### `home_stepper(stepper_id, direction=-1, home_velocity=500, backoff_steps=50, blocking=True, timeout=None) → bool`
 Home against limit switch, then back off `backoff_steps` steps. Returns `True`
 on completion. Publishes `/step_home`.
 
 `home_velocity` is in steps/s. `direction`: −1 (retract) or +1 (extend).
 
-#### `step_set_config(stepper_id, max_velocity, acceleration) → None`
+#### `set_stepper_config(stepper_id, max_velocity, acceleration) → None`
 Set speed and acceleration limits. Both are in steps/s and steps/s².
 Publishes `/step_config_set`.
 
-#### `request_step_config(stepper_id) → None`
+#### `request_stepper_config(stepper_id) → None`
 Request the active config from firmware. Response arrives on `/step_config_rsp`.
 
-#### `get_step_config(stepper_id) → StepConfig | None`
+#### `get_stepper_config(stepper_id) → StepConfig | None`
 Return cached config. Fields: `stepper_number`, `max_velocity`, `acceleration`.
 
-#### `get_step_state() → StepStateAll | None`
+#### `get_stepper_state() → StepStateAll | None`
 Cached `/step_state_all` at 50 Hz.
 
 Each `steppers[i]` (`StepperState`) contains: `stepper_number`, `enabled`,
 `motion_state`, `limit_flags`, `count`, `target_count`, `current_speed`,
 `timestamp`
+
+The former `step_*` method names remain available as deprecated aliases. They
+emit `DeprecationWarning`; use `enable_stepper`, `disable_stepper`,
+`move_stepper`, `home_stepper`, `set_stepper_config`,
+`request_stepper_config`, `get_stepper_config`, and `get_stepper_state`.
 
 ---
 
@@ -848,7 +853,7 @@ code reads via ROS topics.
 |----------|---------------|
 | `kinematics` | `get_pose()`, `get_velocity()` |
 | `dc_status_all` | `get_dc_state()` |
-| `step_status_all` | `get_step_state()` |
+| `step_status_all` | `get_stepper_state()` |
 | `servo_status_all` | `get_servo_state()` |
 | `io_status` | `get_button()`, `get_limit()`, `get_io_output_state()` |
 | `imu` | `get_imu()` |
